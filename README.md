@@ -95,6 +95,22 @@ client/workbench/       React 外壳与构建入口
 test/                   集成与生命周期测试
 ```
 
+
+## 为什么不用现成方案
+
+这个项目的目标很窄：**在 Cloudreve 的原生文件上实时协作编辑同一个 `.md`，同时不破坏宿主权限与文件锁，也不丢内容**。按这个目标逐项比对过现有方案：
+
+| 方案 | 符合的部分 | 不满足的部分 |
+|---|---|---|
+| [Cloudreve 内置 Markdown 编辑器](https://docs.cloudreve.org/usage/file-apps) | 原生读写宿主文件、遵循宿主权限与锁、零部署 | 无实时协作；无草稿恢复、外部改动冲突处理、公式/大纲增强 |
+| [HedgeDoc](https://hedgedoc.org/)（原 CodiMD） | 开源、自托管、实时协作成熟，含演示模式与图表 | 文档存放在自己的库里，不是宿主文件；没有 WOPI，权限与文件锁需另做桥接 |
+| OnlyOffice / Collabora Online（WOPI 套件） | WOPI 原生、协作成熟 | 面向 OOXML/ODF，Markdown 不是其格式；无 Markdown 预览、大纲与数学渲染 |
+| HackMD / Vrite / StackEdit 等 | 编辑体验成熟 | 独立编辑器或 SaaS，无 WOPI、无宿主文件语义 |
+
+结论：协作强的（HedgeDoc）不接 WOPI，WOPI 强的（Office 套件）不做 Markdown。给 HedgeDoc 写 WOPI 适配在理论上可行，但工作量与本实现同量级，且要改它的存储与权限假设。
+
+因此本项目只做补缺口的那一层：**WOPI 会话与锁、服务端串行保存、CRDT 协作、草稿与冲突恢复**，编辑体验则复用成熟组件（Monaco、Yjs、KaTeX）。
+
 ## Roadmap
 
 - [ ] **VSCode 式冲突编辑器**（`external-file-changed` 的完整解决流程）
