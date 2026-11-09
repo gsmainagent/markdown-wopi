@@ -1,0 +1,276 @@
+'use strict';
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const https = require('node:https');
+const {fileMetadata,refreshError}=require('./server-state.cjs');
+const {createCollaboration}=require('./collaboration.cjs');
+const RENEW_MS=Math.max(1000,Number(process.env.LOCK_REFRESH_MS)||240000);
+const PRESENCE_MS=12*60000;
+
+const PORT = parseInt(process.env.PORT || '3001', 10);
+const MOCK = process.env.MOCK === '1';
+const BASE_URL = (process.env.BASE_URL || '').replace(/\/+$/, '');
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const STATIC_DIR = path.join(__dirname, 'static');
+const MOCK_FILE = path.join(__dirname, 'mock-data.md');
+const MAX_BODY = 20 * 1024 * 1024;
+
+// 会话仅在内存：sid -> { wopisrc, token, ttl, created, lockId, lockFailed }
+// access_token 全程不出服务端；编辑器只拿随机 sid。
+const sessions = new Map();
+
+const newSid = () => crypto.randomBytes(24).toString('base64url');
+const live = (s) => Date.now() <= Math.min(s.ttl, s.created + 12 * 3600 * 1000);
+let collaboration;
+setInterval(()=>{for(const [sid,session] of sessions)if(!live(session)){void collaboration?.leave(sid).catch(()=>{});sessions.delete(sid);}},60000).unref();
+
+function log(sid, method, p, status) {
+  console.log(new Date().toISOString(), (sid || '-').slice(0, 8), method, p, status);
+}
+
+function send(res, status, body, type) {
+  const b = typeof body === 'string' ? body : JSON.stringify(body);
+  res.writeHead(status, { 'Content-Type': type || 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(b);
+  return status;
+}
+
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let n = 0;
+    req.on('data', (c) => {
+      n += c.length;
+      if (n > limit) { reject(Object.assign(new Error('body too large'), { code: 413 })); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// 用 http/https.request 而非全局 fetch：不受 NODE_USE_ENV_PROXY/HTTP_PROXY 等环境变量劫持
+function upstream(urlStr, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const mod = u.protocol === 'https:' ? https : http;
+    const headers = { ...(opts.headers || {}) };
+    if (opts.body !== undefined) headers['Content-Length'] = Buffer.byteLength(opts.body);
+    const req = mod.request(u, { method: opts.method || 'GET', headers, timeout: 15000 }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks);
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          json: async () => JSON.parse(body.toString('utf8')),
+          text: async () => body.toString('utf8'),
+        });
+      });
+    });
+    req.on('timeout', () => req.destroy(Object.assign(new Error('upstream timeout'), { status: 504 })));
+    req.on('error', (e) => reject(Object.assign(e, { status: e.status || 502 })));
+    if (opts.body !== undefined) req.write(opts.body);
+    req.end();
+  });
+}
+
+const withToken = (s, suffix) => {
+  const sep = s.wopisrc.includes('?') ? '&' : '?';
+  return s.wopisrc + (suffix || '') + sep + 'access_token=' + encodeURIComponent(s.token);
+};
+
+async function wopiCheckFileInfo(s) {
+  const r = await upstream(withToken(s));
+  if (!r.ok) throw Object.assign(new Error('checkfileinfo HTTP ' + r.status), { status: 502 });
+  const j = await r.json();
+  const info=fileMetadata(s,j); s.fileInfo=info; return info;
+}
+
+async function wopiGetContents(s) {
+  const r = await upstream(withToken(s, '/contents'));
+  if (!r.ok) throw Object.assign(new Error('getfile HTTP ' + r.status), { status: 502 });
+  return await r.text();
+}
+
+async function wopiLock(s) {
+  const lockId = crypto.randomBytes(16).toString('hex');
+  const r = await upstream(withToken(s), { method: 'POST', headers: { 'X-WOPI-Lock': lockId, 'X-WOPI-Override': 'LOCK' } });
+  if (r.status === 200) { s.lockId = lockId; s.closing=false; s.lastSeen=Date.now(); s.nextRefresh=Date.now()+RENEW_MS; return { ok: true }; }
+  if (r.status !== 409) throw Object.assign(new Error('lock HTTP ' + r.status), { status: 502 });
+  return { ok: false, conflict: true };
+}
+
+const wopiRefreshLock = async (s) => {
+  if (!s.lockId || s.closing) throw Object.assign(new Error('document lock unavailable'),{status:409});
+  if(s.refreshing)return s.refreshing;
+  s.refreshing=(async()=>{
+    const r=await upstream(withToken(s),{method:'POST',headers:{'X-WOPI-Lock':s.lockId,'X-WOPI-Override':'REFRESH_LOCK'}});
+    if(r.status!==200){if([401,403,409].includes(r.status))s.lockFailed=true;throw refreshError(r.status);}
+    s.lastRefreshError=null;s.nextRefresh=Date.now()+RENEW_MS;
+  })().finally(()=>{s.refreshing=null;});
+  return s.refreshing;
+};
+
+async function wopiPutFile(s, text) {
+  const headers = { 'X-WOPI-Override': 'PUT', 'Content-Type': 'text/plain; charset=utf-8' };
+  if (s.lockId) headers['X-WOPI-Lock'] = s.lockId;
+  const r = await upstream(withToken(s, '/contents'), { method: 'POST', headers, body: text });
+  return r.status;
+}
+
+async function wopiUnlock(s) {
+  if (!s.lockId) return;
+  s.closing=true;
+  if(s.refreshing)try{await s.refreshing;}catch{}
+  try {
+    const response=await upstream(withToken(s), { method:'POST',headers:{'X-WOPI-Lock':s.lockId,'X-WOPI-Override':'UNLOCK'} });
+    console.log(new Date().toISOString(),'WOPI','UNLOCK',response.status);
+    if(!response.ok)throw Object.assign(new Error('unlock HTTP '+response.status),{status:response.status});
+    s.lockId=null;
+  } catch(e) {
+    if(!/^unlock HTTP /.test(e.message))console.warn(new Date().toISOString(),'WOPI','UNLOCK',e.status||502);
+    throw e;
+  }
+}
+
+function discoveryXML(base) {
+  const esc = base.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // 注意：urlsrc 中不得出现子串 lng（Cloudreve 前端会盲替换字面量 lng / darkmode）
+  const urlsrc = esc + '/wopi/edit?WOPISrc=&lt;wopisrc&gt;&amp;theme=darkmode';
+  const zone = (name) =>
+    '  <net-zone name="' + name + '">\n' +
+    '    <app name="WopiMdEditor">\n' +
+    ['md', 'markdown'].map((ext) =>
+      '      <action ext="' + ext + '" name="view" default="true" urlsrc="' + urlsrc + '"/>\n' +
+      '      <action ext="' + ext + '" name="edit" urlsrc="' + urlsrc + '"/>'
+    ).join('\n') + '\n' +
+    '    </app>\n' +
+    '  </net-zone>';
+  return '<?xml version="1.0" encoding="utf-8"?>\n<wopi-discovery>\n' + zone('external-https') + '\n' + zone('external-http') + '\n</wopi-discovery>\n';
+}
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.eot': 'application/vnd.ms-fontobject', '.map': 'application/json',
+};
+
+function serveStatic(res, pathname) {
+  const rel = decodeURIComponent(pathname.replace(/^\/static\//, ''));
+  const full = path.resolve(STATIC_DIR, rel);
+  if (full !== STATIC_DIR && !full.startsWith(STATIC_DIR + path.sep)) return void log(null, 'GET', pathname, send(res, 403, { ok: false }));
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) return void log(null, 'GET', pathname, send(res, 404, { ok: false }));
+    const ext = path.extname(full).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Length': st.size,
+      'Cache-Control': 'no-cache',
+    });
+    fs.createReadStream(full).pipe(res);
+  });
+}
+
+async function handleShim(req, res, u) {
+  if (ALLOWED_ORIGINS.length) {
+    const org = req.headers.origin;
+    if (org && !ALLOWED_ORIGINS.includes(org)) return void log(null, req.method, u.pathname, send(res, 403, { ok: false, error: 'origin not allowed' }));
+  }
+  let wopisrc = u.searchParams.get('WOPISrc');
+  let token = u.searchParams.get('access_token') || '';
+  let ttl = parseInt(u.searchParams.get('access_token_ttl') || '0', 10);
+  if (req.method === 'POST') {
+    const form = new URLSearchParams((await readBody(req, 64 * 1024)).toString('utf8'));
+    token = form.get('access_token') || token;
+    ttl = parseInt(form.get('access_token_ttl') || '0', 10) || ttl;
+    wopisrc = wopisrc || form.get('WOPISrc');
+  }
+  if (!wopisrc) return void log(null, req.method, u.pathname, send(res, 400, { ok: false, error: 'WOPISrc required' }));
+  if (!token) return void log(null, req.method, u.pathname, send(res, 400, { ok: false, error: 'access_token required' }));
+  const sid = newSid();
+  sessions.set(sid, { wopisrc, token, ttl: ttl > Date.now() ? ttl : Date.now() + 3600e3, created: Date.now(), lockId: null, lockFailed: false });
+  var target = u.searchParams.get('ui') === 'legacy' ? '/static/editor.html' : '/static/monaco-editor.html';
+  // Cloudreve replaces the first literal darkmode with 2 (dark) or 1 (light). Forward only a validated cosmetic value.
+  const requestedTheme = u.searchParams.get('theme') || '';
+  const theme = /^(dark|2|true)$/i.test(requestedTheme) ? 'dark' : /^(light|1|false)$/i.test(requestedTheme) ? 'light' : '';
+  res.writeHead(303, { Location: target + '#s=' + sid + (theme ? '&theme=' + theme : ''), 'Cache-Control': 'no-store' });
+  res.end();
+  log(sid, req.method, u.pathname, 303);
+}
+
+async function handleApi(req,res,u){
+ const match=u.pathname.match(/^\/api\/(doc|unlock|keepalive|save|status|resolve)\/([A-Za-z0-9_-]+)$/);
+ if(!match)return void send(res,404,{ok:false});
+ const kind=match[1],sid=match[2],session=sessions.get(sid);
+ if(kind==='unlock'){if(req.method!=='POST')return void send(res,405,{ok:false});await collaboration.leave(sid);res.writeHead(204);return res.end();}
+ if(!session||!live(session))return void send(res,404,{ok:false,error:'session expired'});
+ session.lastSeen=Date.now();
+ if(kind==='doc'&&req.method==='GET'){
+  const {room,info,canWrite}=await collaboration.attach(session,sid);
+  return void send(res,200,{ok:true,name:info.name,canWrite,lockedByOther:room.blocked==='external-lock',content:room.text(),size:Buffer.byteLength(room.text()),draftKey:info.draftKey,version:info.version,eol:room.eol,capabilities:info.capabilities,collab:{roomId:room.key,user:collaboration.identity(session,info),status:collaboration.status(room)}});
+ }
+ const room=collaboration.roomFor(session);if(!room)return void send(res,409,{ok:false,error:'open document before collaboration requests'});
+ if(kind==='resolve'&&req.method==='POST'){
+  let action='';try{action=JSON.parse((await readBody(req,4096)).toString('utf8')).action;}catch{}
+  if(action!=='use-cloud')return void send(res,400,{ok:false,error:'unsupported action'});
+  if(!room.blocked)return void send(res,409,{ok:false,error:'room is not blocked'});
+  await collaboration.discard(room);return void send(res,200,{ok:true});
+ }
+ if(kind==='status'&&req.method==='GET')return void send(res,200,{ok:true,...collaboration.status(room)});
+ if(kind==='keepalive'&&req.method==='POST'){room.lastSeen=Date.now();if(room.blocked)return void send(res,409,{ok:false,error:room.blocked});await collaboration.renew(room);return void send(res,200,{ok:true,expires:session.ttl,...collaboration.status(room)});}
+ if(kind==='save'&&req.method==='POST'){
+  const member=room.members.get(sid);if(!member?.canWrite)return void send(res,403,{ok:false,error:'read-only'});
+  const status=await collaboration.flush(room);return void send(res,200,{ok:true,...status});
+ }
+ // Raw full-document client PUT is forbidden in shared rooms: it could overwrite peers.
+ if(kind==='doc'&&req.method==='PUT')return void send(res,403,{ok:false,error:'use shared Yjs updates; raw document overwrite disabled'});
+ return void send(res,405,{ok:false});
+}
+
+async function handleMock(req, res, u) {
+  const p = u.pathname;
+  if (p === '/mock/wopi/files/1' && req.method === 'GET') {
+    const st = fs.statSync(MOCK_FILE);
+    return void log(null, 'GET', p, send(res, 200, { BaseFileName: 'mock-data.md', UserCanWrite: true, Size: st.size }));
+  }
+  if (p === '/mock/wopi/files/1/contents' && req.method === 'GET') {
+    return void log(null, 'GET', p, send(res, 200, fs.readFileSync(MOCK_FILE, 'utf8'), 'text/plain; charset=utf-8'));
+  }
+  if (p === '/mock/wopi/files/1/contents' && req.method === 'POST') {
+    const body = await readBody(req, MAX_BODY);
+    fs.writeFileSync(MOCK_FILE, body);
+    return void log(null, 'POST', p, send(res, 200, { ok: true }));
+  }
+  return void log(null, req.method, p, send(res, 404, { ok: false }));
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    const p = u.pathname;
+    if (p === '/healthz') return void log(null, req.method, p, send(res, 200, 'ok', 'text/plain; charset=utf-8'));
+    if (p === '/hosting/discovery') {
+      const base = BASE_URL || 'http://' + (req.headers.host || '127.0.0.1:' + PORT);
+      return void log(null, req.method, p, send(res, 200, discoveryXML(base), 'application/xml; charset=utf-8'));
+    }
+    if (p === '/wopi/edit' && (req.method === 'POST' || req.method === 'GET')) return await handleShim(req, res, u);
+    if (p.startsWith('/api/')) return await handleApi(req, res, u);
+    if (MOCK && p.startsWith('/mock/')) return await handleMock(req, res, u);
+    if (p.startsWith('/static/')) return serveStatic(res, p);
+    return void log(null, req.method, p, send(res, 404, { ok: false }));
+  } catch (e) {
+    const status = (e && e.code === 413) ? 413 : (e && e.status) || 500;
+    log(null, req.method, new URL(req.url,'http://localhost').pathname, status);
+    if (!res.headersSent) send(res, status, { ok: false, error: e.message || 'internal error' });
+  }
+});
+
+collaboration=createCollaboration({server,sessions,live,checkInfo:wopiCheckFileInfo,getContents:wopiGetContents,lock:wopiLock,refresh:wopiRefreshLock,put:wopiPutFile,unlock:wopiUnlock,dataDir:process.env.COLLAB_DATA_DIR||path.join(__dirname,'.runtime','rooms'),origin:req=>BASE_URL||'http://'+req.headers.host,saveDelay:Number(process.env.COLLAB_SAVE_MS)||1000,renewMs:RENEW_MS,graceMs:Number(process.env.COLLAB_GRACE_MS)||15000});
+let stopping=false;async function shutdown(){if(stopping)return;stopping=true;await collaboration.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),3000).unref();}
+process.on('SIGTERM',()=>void shutdown());process.on('SIGINT',()=>void shutdown());
+const BIND = process.env.BIND || '127.0.0.1';
+server.listen(PORT, BIND, () => console.log('wopi-md-editor listening on', BIND + ':' + PORT, MOCK ? '(MOCK)' : ''));

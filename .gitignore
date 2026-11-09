@@ -1,0 +1,12 @@
+node_modules/
+static/
+.runtime/
+*.log
+.env
+.check-*
+candidate-manifest.json
+RELEASE.json
+README.candidate.md
+infra/frpc.toml
+deployment-*/
+.DS_Store

@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {imageType,imageMarkdown,MAX_IMAGE_BYTES} from './src/embedded-images-core.js';
+const png=Uint8Array.from([137,80,78,71,13,10,26,10,0]);
+test('inline image stores portable data not a session URL or upload token',()=>{const text=imageMarkdown(png,'a[b]');assert.match(text,/data:image\/png;base64,/);assert.ok(text.includes('a\\[b\\]'));assert.ok(!text.includes('/api/'));});
+test('SVG/HTML disguised as image MIME is rejected by magic signature',()=>{assert.equal(imageType(new TextEncoder().encode('<svg onload=alert(1)>')),null);assert.throws(()=>imageMarkdown(new TextEncoder().encode('<html>')));});
+test('size cap and supported binary signatures',()=>{assert.throws(()=>imageMarkdown(new Uint8Array(MAX_IMAGE_BYTES+1)));assert.equal(imageType(Uint8Array.from([255,216,255])), 'image/jpeg');assert.equal(imageType(new TextEncoder().encode('GIF89a')), 'image/gif');assert.equal(imageType(new TextEncoder().encode('RIFF1234WEBP')), 'image/webp');});

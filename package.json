@@ -1,0 +1,35 @@
+{
+  "name": "wopi-react-workbench-candidate",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test client/*.test.mjs test/*.test.cjs",
+    "build": "npm test && node client/build.mjs && vite build && node client/workbench/finalize-build.mjs",
+    "dev": "vite --host 127.0.0.1 --port 3007 --strictPort"
+  },
+  "dependencies": {
+    "@mdit/plugin-katex": "1.1.5",
+    "github-slugger": "2.0.0",
+    "highlight.js": "11.12.0",
+    "katex": "0.19.1",
+    "lib0": "0.2.119",
+    "markdown-it": "15.0.3",
+    "monaco-editor": "0.57.0",
+    "ws": "8.22.1",
+    "y-monaco": "0.1.6",
+    "y-protocols": "1.0.7",
+    "y-websocket": "3.1.0",
+    "yjs": "13.6.33",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "@radix-ui/react-dropdown-menu": "2.2.1",
+    "@radix-ui/react-dialog": "1.3.1",
+    "@radix-ui/react-tooltip": "1.4.1",
+    "lucide-react": "1.70.0"
+  },
+  "devDependencies": {
+    "chrome-remote-interface": "0.34.0",
+    "esbuild": "0.28.2",
+    "vite": "8.3.6"
+  }
+}

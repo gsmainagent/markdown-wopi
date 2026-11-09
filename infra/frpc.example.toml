@@ -1,0 +1,14 @@
+# Example only. Copy to frpc.toml and fill in your own values.
+serverAddr = "YOUR-FRP-SERVER-HOST"
+serverPort = 7000
+auth.method = "token"
+auth.token = "{{ .Envs.FRP_TOKEN }}"
+log.to = "console"
+log.level = "info"
+
+[[proxies]]
+name = "markdown-wopi"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 3001
+customDomains = ["YOUR-EDITOR-DOMAIN"]
