@@ -1,0 +1,40 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - package.json
+      - package-lock.json
+      - server.js
+      - server-state.cjs
+      - collaboration.cjs
+      - client/**
+      - .github/workflows/docker.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - package.json
+      - package-lock.json
+      - server.js
+      - server-state.cjs
+      - collaboration.cjs
+      - client/**
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: markdown-wopi:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
