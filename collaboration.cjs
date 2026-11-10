@@ -10,7 +10,7 @@ function roomKey(s){const u=new URL(s.wopisrc);return hash(u.origin+u.pathname);
 function packet(type,write){const e=enc.createEncoder();enc.writeVarUint(e,type);write(e);return enc.toUint8Array(e);}
 function atomic(file,bytes){const tmp=file+'.tmp';fs.writeFileSync(tmp,bytes,{mode:0o600});fs.renameSync(tmp,file);}
 class Journal{
- constructor(dir,key){this.dir=path.join(dir,key);fs.mkdirSync(this.dir,{recursive:true,mode:0o700});this.meta=path.join(this.dir,'meta.json');this.snapshot=path.join(this.dir,'state.bin');this.log=path.join(this.dir,'updates.bin');}
+ constructor(dir,key){this.dir=path.join(dir,key);fs.mkdirSync(this.dir,{recursive:true,mode:0o700});this.meta=path.join(this.dir,'meta.json');this.snapshot=path.join(this.dir,'state.bin');this.log=path.join(this.dir,'updates.bin');this.ancestor=path.join(this.dir,'ancestor.bin');}
  restore(doc){if(!fs.existsSync(this.meta))return null;const meta=JSON.parse(fs.readFileSync(this.meta,'utf8'));if(fs.existsSync(this.snapshot))Y.applyUpdate(doc,fs.readFileSync(this.snapshot),'journal');if(fs.existsSync(this.log)){const data=fs.readFileSync(this.log);let pos=0;while(pos+4<=data.length){const n=data.readUInt32LE(pos);pos+=4;if(n>MAX_UPDATE||pos+n>data.length)throw Error('incomplete recovery journal');Y.applyUpdate(doc,data.subarray(pos,pos+n),'journal');pos+=n;}if(pos!==data.length)throw Error('truncated recovery journal');}return meta;}
  append(update){const h=Buffer.alloc(4);h.writeUInt32LE(update.length);const fd=fs.openSync(this.log,'a',0o600);try{fs.writeSync(fd,Buffer.concat([h,Buffer.from(update)]));fs.fdatasyncSync(fd);}finally{fs.closeSync(fd);}}
  checkpoint(doc,meta){atomic(this.snapshot,Y.encodeStateAsUpdate(doc));atomic(this.meta,JSON.stringify(meta));atomic(this.log,Buffer.alloc(0));}
@@ -45,6 +45,39 @@ function createCollaboration({server,sessions,live,checkInfo,getContents,lock,re
   if(r.blocked)throw Object.assign(Error(r.blocked),{status:409});if(r.renewing)return r.renewing;
   r.renewing=(async()=>{try{await acquire(r);const session=await writer(r);await refresh(session);r.nextRenew=Date.now()+renewMs;r.error=null;return status(r);}catch(e){r.error=e.message;if([401,403,409].includes(e.status))r.blocked='lock-or-session-lost';sendStatus(r);throw e;}finally{r.renewing=null;}})();return r.renewing;
  }
+ // Decodes the journal's last-saved snapshot into plain text. A missing or unreadable
+ // snapshot simply means "no common base"; the client then falls back to a two-way compare.
+ function baseText(r){
+  try{
+   if(fs.existsSync(r.journal.ancestor))return fs.readFileSync(r.journal.ancestor,'utf8').replace(/\n/g,r.eol);
+   if(!fs.existsSync(r.journal.snapshot))return null;
+   const doc=new Y.Doc();
+   try{Y.applyUpdate(doc,fs.readFileSync(r.journal.snapshot),'base');return doc.getText('markdown').toString().replace(/\n/g,r.eol);}
+   finally{doc.destroy();}
+  }catch{return null;}
+ }
+ async function conflict(r){
+  if(!r.blocked)throw Object.assign(Error('room is not in conflict'),{status:409});
+  const member=[...r.members.values()].find(m=>live(m.session));
+  if(!member)throw Object.assign(Error('reopen the document from Cloudreve to load the latest host content'),{status:409});
+  const theirs=await getContents(member.session);
+  return {base:baseText(r),ours:r.text(),theirs,eol:r.eol};
+ }
+ async function resolveMerge(r,text){
+  if(!r.blocked)throw Object.assign(Error('room is not in conflict'),{status:409});
+  if(typeof text!=='string')throw Object.assign(Error('merged text is required'),{status:400});
+  if(text.length>MAX_TEXT)throw Object.assign(Error('document limit exceeded'),{status:413});
+  if(![...r.members.values()].some(m=>m.canWrite&&live(m.session)))throw Object.assign(Error('no writable member can resolve this conflict'),{status:403});
+  if(r.saving)try{await r.saving;}catch{}
+  // Apply while still blocked so no autosave races the merge, then hand it to the normal
+  // serialised save path (acquire -> REFRESH_LOCK -> PutFile). A refused host write keeps
+  // the room blocked; the merged state itself is already recorded in the journal.
+  const lines=canonical(text).split('\n');
+  r.doc.transact(()=>{const t=r.doc.getText('markdown');t.delete(0,t.length);t.insert(0,lines.join('\n'));},'conflict-merge');
+  r.blocked=null;r.error=null;
+  try{return await flush(r);}
+  catch(e){r.blocked=e.status===409?'lock-conflict':'permission-or-session';r.error=e.message;sendStatus(r);throw e;}
+ }
  async function attach(s,sid){
   if(stopping)throw Object.assign(Error('server is stopping'),{status:503});
   if(!live(s))throw Object.assign(Error('session expired'),{status:404});const info=await checkInfo(s);s.lastSeen=Date.now();const key=roomKey(s);let r=rooms.get(key);
@@ -63,6 +96,7 @@ function createCollaboration({server,sessions,live,checkInfo,getContents,lock,re
     const value=()=>doc.getText('markdown').toString().replace(/\n/g,eol),recovered=value();if(meta&&meta.baseHash!==hash(cloud)&&hash(recovered)!==hash(cloud))blocked='external-file-changed; download recovered copy before resolution';
     const dirty=recovered!==cloud;const room={key,doc,journal,eol,version:info.version,text:value,members:new Map(),connections:new Set(),writer:null,lockId:null,revision:dirty?1:0,persistedRevision:0,baseHash:hash(cloud),blocked,timer:null,saving:null,lastSeen:Date.now(),savedAt:meta?.savedAt||null};
     room.awareness=new awareness.Awareness(doc);room.awareness.setLocalState(null);if(!meta)journal.checkpoint(doc,{baseHash:room.baseHash,eol,savedAt:room.savedAt});
+    if(!meta)try{fs.writeFileSync(journal.ancestor,Buffer.from(canonical(cloud)),{mode:0o600});}catch{}
     doc.on('update',(update,origin)=>{try{journal.append(update);}catch(e){room.blocked='journal-write-failed';room.error=e.message;}room.revision++;broadcast(room,packet(0,e=>sync.writeUpdate(e,update)));sendStatus(room);schedule(room);});
     room.awareness.on('update',({added,updated,removed})=>broadcast(room,packet(1,e=>enc.writeVarUint8Array(e,awareness.encodeAwarenessUpdate(room.awareness,added.concat(updated,removed))))));rooms.set(key,room);return room;})().finally(()=>pending.delete(key)));
    r=await pending.get(key);
@@ -167,7 +201,7 @@ function createCollaboration({server,sessions,live,checkInfo,getContents,lock,re
   if(!r.connections.size&&now-r.lastSeen>graceMs&&!r.attaching){void retire(r).catch(()=>{});continue;}
   if((r.connections.size||r.members.size)&&r.lockId&&!r.blocked&&now>=r.nextRenew){r.nextRenew=now+renewMs;void renew(r).catch(()=>{});}
  }},Math.min(10000,Math.max(1000,renewMs))).unref();
- return {attach,leave,discard,status,identity,flush,renew,roomFor(s){return rooms.get(s.roomKey);},async close(){
+ return {attach,leave,discard,status,identity,flush,renew,conflict,resolveMerge,roomFor(s){return rooms.get(s.roomKey);},async close(){
   stopping=true;clearInterval(heartbeat);await Promise.allSettled([...pending.values()]);
   await Promise.allSettled([...rooms.values()].map(r=>retire(r,'shutdown')));wss.close();
  },rooms};

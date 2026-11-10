@@ -35,3 +35,32 @@ test('disconnect/reconnect merges offline changes and does not duplicate seed te
 test('server restart restores CRDT journal while external file divergence blocks overwrite',{timeout:20000},async t=>{const h=await harness(t),a=await h.session(),x=await h.connect(a);x.doc.getText('markdown').insert(0,'persist');x.provider.ws.send(new Uint8Array([5]));await until(()=>!x.status.dirty&&h.files.get('1').startsWith('persist'),x.events,'status');x.provider.disconnect();await h.stop();h.files.set('1','EXTERNAL CHANGE');await h.start();const next=await h.session();assert.equal(next.data.canWrite,false);assert.match(next.data.collab.status.blocked,/external-file-changed/);assert.equal(h.files.get('1'),'EXTERNAL CHANGE');assert.ok(next.data.content.startsWith('persist'));});
 
 test('historical WOPI version cannot join or overwrite the active live room',{timeout:15000},async t=>{const h=await harness(t);await h.session();const old=await h.session('reader-old','1',409);assert.match(old.data.error,/version differs/);assert.equal(h.records.puts.length,0);assert.equal(h.files.get('1'),'# Shared\r\n原文');});
+
+test('conflict endpoints expose base/ours/theirs and write the merge back through the host lock',{timeout:25000},async t=>{
+ const h=await harness(t),a=await h.session(),x=await h.connect(a);
+ x.doc.getText('markdown').insert(0,'LOCAL');x.provider.ws.send(new Uint8Array([5]));
+ await until(()=>!x.status.dirty&&h.files.get('1').startsWith('LOCAL'),x.events,'status');
+ h.files.set('1','EXTERNAL CHANGE');
+ await h.stop();await h.start();
+ const next=await h.session();
+ assert.equal(next.data.canWrite,false);
+ assert.match(next.data.collab.status.blocked,/external-file-changed/);
+ const got=await h.request(h.base+'/api/conflict/'+next.sid);assert.equal(got.status,200);const k=JSON.parse(got.body);
+ assert.equal(k.theirs,'EXTERNAL CHANGE');assert.ok(k.base.includes('\u539f\u6587')&&!k.base.includes('LOCAL'),'base is the pre-edit ancestor, not our own save');assert.ok(k.ours.includes('LOCAL'));assert.notEqual(k.ours,k.base);assert.equal(k.eol,'\r\n');
+ const bad=await h.request(h.base+'/api/conflict/'+next.sid,{method:'POST',body:JSON.stringify({text:null}),headers:{'Content-Type':'application/json'}});
+ assert.equal(bad.status,400);assert.equal(h.files.get('1'),'EXTERNAL CHANGE','a rejected merge must not touch the host file');
+ const before=h.records.puts.length;
+ const put=await h.request(h.base+'/api/conflict/'+next.sid,{method:'POST',body:JSON.stringify({text:'merged a\nmerged b'}),headers:{'Content-Type':'application/json'}});
+ assert.equal(put.status,200);const st=JSON.parse(put.body);assert.equal(st.blocked,null);assert.equal(st.dirty,false);
+ assert.equal(h.files.get('1'),'merged a\r\nmerged b','merge must keep the document line ending');
+ assert.equal(h.records.puts.length,before+1,'exactly one host write per merge');
+ const locks=h.records.locks;assert.ok(locks>=2,'the merge has to re-acquire a host lock');
+ const after=await h.request(h.base+'/api/status/'+next.sid);assert.equal(JSON.parse(after.body).blocked,null);
+});
+
+test('conflict endpoints refuse while the room has no conflict',{timeout:15000},async t=>{
+ const h=await harness(t),a=await h.session(),x=await h.connect(a);
+ const got=await h.request(h.base+'/api/conflict/'+a.sid);assert.equal(got.status,409);assert.match(JSON.parse(got.body).error,/not in conflict/);
+ const put=await h.request(h.base+'/api/conflict/'+a.sid,{method:'POST',body:JSON.stringify({text:'whatever'}),headers:{'Content-Type':'application/json'}});
+ assert.equal(put.status,409);assert.equal(h.files.get('1'),'# Shared\r\n原文','an ordinary room must not be rewritten by the conflict route');
+});

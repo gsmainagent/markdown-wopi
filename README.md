@@ -113,7 +113,7 @@ test/                   集成与生命周期测试
 
 ## Roadmap
 
-- [ ] **VSCode 式冲突编辑器**（`external-file-changed` 的完整解决流程）
+- [x] **VSCode 式冲突编辑器**（`external-file-changed` 的完整解决流程）— 已在分支 `feature/conflict-editor` 实现并验证，见 issue #1；**尚未发布到线上**
       三方内容已具备：base＝上次保存的 journal 快照、ours＝本机恢复稿、theirs＝当前云端。
       目标：三栏对比 + 逐块接受（左取右），合并结果仍通过服务端锁与串行保存写回；在此之前先提供两栏 diff 与“全部用云端 / 全部用恢复稿 / 分别下载”。
 - [ ] 冲突解决后自动解除只读并恢复协作写入。

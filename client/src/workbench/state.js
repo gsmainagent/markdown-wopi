@@ -18,4 +18,4 @@ export function statusPresentation(s){
 }
 export function activeHeading(headings,line){return headings.filter(h=>h.line<=line).at(-1)?.id||null;}
 export function mayReload(s){return !s.localDirty&&!s.status?.dirty&&!s.recovery?.pending;}
-export const initialState={phase:'loading',name:'正在打开文稿…',authorized:false,readOnly:true,connected:false,initialSynced:false,localDirty:false,demo:false,headings:[],activeHeading:null,status:{},notice:'',banner:'',bannerKind:'',recovery:null,cursor:{line:1,column:1,selected:0},eol:'LF',peers:[],wrapped:true,syncScroll:true,duration:null};
+export const initialState={phase:'loading',name:'正在打开文稿…',authorized:false,readOnly:true,connected:false,initialSynced:false,localDirty:false,demo:false,headings:[],activeHeading:null,status:{},notice:'',banner:'',bannerKind:'',recovery:null,conflict:null,conflictBusy:false,cursor:{line:1,column:1,selected:0},eol:'LF',peers:[],wrapped:true,syncScroll:true,duration:null};
