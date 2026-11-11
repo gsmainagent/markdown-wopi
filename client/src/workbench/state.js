@@ -16,6 +16,12 @@ export function statusPresentation(s){
  if(s.status?.dirty||s.localDirty)return {label:'有未保存修改',tone:'warning'};
  return {label:s.status?.savedAt?'已保存':'已同步',tone:'success'};
 }
+// Two independent thresholds: the outline becomes a drawer well before the preview is
+// dropped, so a mid-width window (browser zoom, docked side window) still shows 编辑与预览.
+export const OUTLINE_DRAWER_AT=760,SPLIT_MIN_WIDTH=520;
+export function outlineOpenForWidth(width){return width>=OUTLINE_DRAWER_AT;}
+export function layoutForWidth(width){return width>=SPLIT_MIN_WIDTH?'split':'editor';}
+
 export function activeHeading(headings,line){return headings.filter(h=>h.line<=line).at(-1)?.id||null;}
 export function mayReload(s){return !s.localDirty&&!s.status?.dirty&&!s.recovery?.pending;}
 export const initialState={phase:'loading',name:'正在打开文稿…',authorized:false,readOnly:true,connected:false,initialSynced:false,localDirty:false,demo:false,headings:[],activeHeading:null,status:{},notice:'',banner:'',bannerKind:'',recovery:null,cursor:{line:1,column:1,selected:0},eol:'LF',peers:[],wrapped:true,syncScroll:true,duration:null};

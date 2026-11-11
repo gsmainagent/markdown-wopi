@@ -3,7 +3,7 @@ import * as Menu from '@radix-ui/react-dropdown-menu';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import {PanelLeft,Columns2,Code2,Eye,MoreHorizontal,Download,RotateCw,Save,Check,WrapText,Link2,Users,FileText,ListTree,Search,ArrowUpRight,X,AlertCircle,LoaderCircle} from 'lucide-react';
-import {createStore,initialState,statusPresentation} from './state.js';
+import {createStore,initialState,statusPresentation,OUTLINE_DRAWER_AT,outlineOpenForWidth,layoutForWidth} from './state.js';
 import {mountSession} from './session.js';
 
 const IconButton=forwardRef(function IconButton({label,children,className='',...props},ref){return <button ref={ref} type="button" className={'icon-button '+className} aria-label={label} {...props}>{children}</button>;});
@@ -22,10 +22,10 @@ function StatusBar({s}){return <footer className="statusbar"><div className="cur
 function ReloadDialog({open,onOpenChange,actions,returnFocus}){return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="dialog-overlay"/><Dialog.Content className="confirm-dialog" onCloseAutoFocus={e=>{e.preventDefault();returnFocus?.();}}><Dialog.Title>重新加载文稿？</Dialog.Title><Dialog.Description>当前可能有尚未保存的修改或本机草稿。建议先下载副本，重新加载不会保证这些修改已经写入云端。</Dialog.Description><div className="dialog-actions"><button className="text-button" onClick={()=>actions.download()}>下载当前副本</button><Dialog.Close asChild><button className="text-button">取消</button></Dialog.Close><button className="text-button accent" onClick={()=>actions.reload()}>继续重新加载</button></div></Dialog.Content></Dialog.Portal></Dialog.Root>;}
 export default function App(){
  const store=useMemo(()=>createStore(initialState),[]),s=useSyncExternalStore(store.subscribe,store.getSnapshot),rootRef=useRef(null),editorRef=useRef(null),previewRef=useRef(null),sessionRef=useRef(null),outlineTriggerRef=useRef(null),moreTriggerRef=useRef(null),layoutChosen=useRef(false),dragging=useRef(false);
- const [narrow,setNarrow]=useState(window.innerWidth<760),[outlineOpen,setOutlineOpen]=useState(window.innerWidth>=760),[layout,setLayoutState]=useState(window.innerWidth<760?'editor':'split'),[share,setShare]=useState(50),[reloadOpen,setReloadOpen]=useState(false);
+ const [narrow,setNarrow]=useState(window.innerWidth<OUTLINE_DRAWER_AT),[outlineOpen,setOutlineOpen]=useState(outlineOpenForWidth(window.innerWidth)),[layout,setLayoutState]=useState(layoutForWidth(window.innerWidth)),[share,setShare]=useState(50),[reloadOpen,setReloadOpen]=useState(false);
  const actions=useMemo(()=>new Proxy({}, {get(_target,key){return (...args)=>sessionRef.current?.[key]?.(...args);}}),[]);
  useEffect(()=>{const session=mountSession({editorHost:editorRef.current,previewHost:previewRef.current,store});sessionRef.current=session;return()=>{session.destroy();sessionRef.current=null;};},[store]);
- useEffect(()=>{const node=rootRef.current,observer=new ResizeObserver(entries=>{const small=entries[0].contentRect.width<760;setNarrow(old=>{if(old!==small){setOutlineOpen(!small);if(!layoutChosen.current)setLayoutState(small?'editor':'split');}return small;});});observer.observe(node);return()=>observer.disconnect();},[]);
+ useEffect(()=>{const node=rootRef.current,observer=new ResizeObserver(entries=>{const width=entries[0].contentRect.width,small=width<OUTLINE_DRAWER_AT;setNarrow(old=>{if(old!==small)setOutlineOpen(!small);return small;});if(!layoutChosen.current)setLayoutState(old=>old===layoutForWidth(width)?old:layoutForWidth(width));});observer.observe(node);return()=>observer.disconnect();},[]);
  useLayoutEffect(()=>{actions.layout();},[layout,narrow,outlineOpen,share,actions]);
  const setLayout=value=>{layoutChosen.current=true;setLayoutState(value);};
  const onReload=()=>{if(actions.hasUnsaved())setReloadOpen(true);else actions.reload();};
