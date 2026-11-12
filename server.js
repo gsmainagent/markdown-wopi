@@ -203,7 +203,7 @@ async function handleShim(req, res, u) {
 }
 
 async function handleApi(req,res,u){
- const match=u.pathname.match(/^\/api\/(doc|unlock|keepalive|save|status|resolve)\/([A-Za-z0-9_-]+)$/);
+ const match=u.pathname.match(/^\/api\/(doc|unlock|keepalive|save|status|resolve|conflict)\/([A-Za-z0-9_-]+)$/);
  if(!match)return void send(res,404,{ok:false});
  const kind=match[1],sid=match[2],session=sessions.get(sid);
  if(kind==='unlock'){if(req.method!=='POST')return void send(res,405,{ok:false});await collaboration.leave(sid);res.writeHead(204);return res.end();}
@@ -214,6 +214,12 @@ async function handleApi(req,res,u){
   return void send(res,200,{ok:true,name:info.name,canWrite,lockedByOther:room.blocked==='external-lock',content:room.text(),size:Buffer.byteLength(room.text()),draftKey:info.draftKey,version:info.version,eol:room.eol,capabilities:info.capabilities,collab:{roomId:room.key,user:collaboration.identity(session,info),status:collaboration.status(room)}});
  }
  const room=collaboration.roomFor(session);if(!room)return void send(res,409,{ok:false,error:'open document before collaboration requests'});
+ if(kind==='conflict'&&req.method==='GET')return void send(res,200,{ok:true,...await collaboration.conflict(room)});
+ if(kind==='conflict'&&req.method==='POST'){
+  let text;try{({text}=JSON.parse((await readBody(req,MAX_BODY)).toString('utf8')));}catch{}
+  if(typeof text!=='string')return void send(res,400,{ok:false,error:'merged text is required'});
+  return void send(res,200,{ok:true,...await collaboration.resolveMerge(room,text)});
+ }
  if(kind==='resolve'&&req.method==='POST'){
   let action='';try{action=JSON.parse((await readBody(req,4096)).toString('utf8')).action;}catch{}
   if(action!=='use-cloud')return void send(res,400,{ok:false,error:'unsupported action'});
