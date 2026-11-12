@@ -14,7 +14,9 @@ const MOCK = process.env.MOCK === '1';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/+$/, '');
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const STATIC_DIR = path.join(__dirname, 'static');
-const MOCK_FILE = path.join(__dirname, 'mock-data.md');
+const MOCK_FILE = process.env.MOCK_FILE || path.join(__dirname, 'mock-data.md');
+// MOCK host keeps one in-memory lock so the self-test can exercise the real lock lifecycle.
+let mockLock = '';
 const MAX_BODY = 20 * 1024 * 1024;
 
 // 会话仅在内存：sid -> { wopisrc, token, ttl, created, lockId, lockFailed }
@@ -241,9 +243,26 @@ async function handleMock(req, res, u) {
     return void log(null, 'GET', p, send(res, 200, fs.readFileSync(MOCK_FILE, 'utf8'), 'text/plain; charset=utf-8'));
   }
   if (p === '/mock/wopi/files/1/contents' && req.method === 'POST') {
+    if (mockLock && req.headers['x-wopi-lock'] !== mockLock) return void log(null, 'POST', p, send(res, 409, { ok: false, error: 'lock mismatch' }));
     const body = await readBody(req, MAX_BODY);
     fs.writeFileSync(MOCK_FILE, body);
     return void log(null, 'POST', p, send(res, 200, { ok: true }));
+  }
+  if (p === '/mock/wopi/files/1' && req.method === 'POST') {
+    const op = req.headers['x-wopi-override'], val = req.headers['x-wopi-lock'] || '';
+    if (op === 'LOCK') {
+      if (mockLock && mockLock !== val) { res.writeHead(409, { 'X-WOPI-Lock': mockLock }); res.end(); return void log(null, 'POST', p + ' LOCK-conflict', 409); }
+      mockLock = val; res.writeHead(200); res.end(); return void log(null, 'POST', p + ' LOCK', 200);
+    }
+    if (op === 'REFRESH_LOCK') {
+      if (mockLock !== val) { res.writeHead(409); res.end(); return void log(null, 'POST', p + ' REFRESH-conflict', 409); }
+      res.writeHead(200); res.end(); return void log(null, 'POST', p + ' REFRESH_LOCK', 200);
+    }
+    if (op === 'UNLOCK') {
+      if (mockLock !== val) { res.writeHead(409, { 'X-WOPI-Lock': mockLock }); res.end(); return void log(null, 'POST', p + ' UNLOCK-conflict', 409); }
+      mockLock = ''; res.writeHead(200); res.end(); return void log(null, 'POST', p + ' UNLOCK', 200);
+    }
+    return void log(null, 'POST', p, send(res, 501, { ok: false, error: 'unsupported override ' + String(op) }));
   }
   return void log(null, req.method, p, send(res, 404, { ok: false }));
 }

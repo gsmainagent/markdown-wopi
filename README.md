@@ -59,7 +59,62 @@ PORT=3001 BASE_URL=http://127.0.0.1:3001 npm start
 | `COLLAB_SAVE_MS` | 自动保存延迟 | `1000` |
 | `COLLAB_GRACE_MS` | 断线宽限期 | `15000` |
 | `LOCK_REFRESH_MS` | 锁续期间隔 | `240000` |
-| `MOCK=1` | 脱离宿主用本地 mock 文稿自测 | 关闭 |
+| `MOCK=1` | 脱离宿主用内置 mock 文稿自测（含 LOCK/REFRESH_LOCK/UNLOCK/PUT 全套锁语义） | 关闭 |
+| `MOCK_FILE` | `MOCK=1` 时读写的样本文件路径 | 镜像内 `/app/mock-data.md`；源码运行为 `./mock-data.md` |
+
+## Docker 部署
+
+镜像为多阶段构建：构建阶段跑 `npm ci` → `npm run build`（含全部测试与入口资源校验）→ `npm prune --omit=dev`；运行阶段只带生产依赖、`server.js`/`server-state.cjs`/`collaboration.cjs`、构建产物 `static/` 与 mock 样本，以非 root 用户 `node` 运行，暴露 3001，journal 默认写在 `/data/rooms`。
+
+```bash
+# 构建（CI 用默认 registry；国内网络可换镜像源）
+docker build -t markdown-wopi:local .
+docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t markdown-wopi:local .
+
+# 运行：journal 必须挂卷，否则重启即丢协作恢复数据
+docker run -d --name wopi-md-editor \
+  -p 127.0.0.1:3001:3001 \
+  -e BASE_URL=https://<你的编辑器域名> \
+  -e ALLOWED_ORIGINS=https://<你的 Cloudreve 域名> \
+  -v wopi-md-editor-data:/data \
+  markdown-wopi:local
+```
+
+只绑定 `127.0.0.1`，对外经反向代理或隧道（frp/nginx）暴露；`BASE_URL` 必须与浏览器实际访问的 scheme/host/port 一致，否则 Origin 校验与 discovery 里的 `urlsrc` 会对不上。
+
+不带宿主的自检（镜像内已含 `mock-data.md`）：
+
+```bash
+docker run -d --name wopi-mock -p 127.0.0.1:18081:3001 -e MOCK=1 -v wopi-mock-data:/data markdown-wopi:local
+curl -s localhost:18081/healthz                                   # ok
+curl -s localhost:18081/mock/wopi/files/1                         # CheckFileInfo
+curl -si -X POST 'localhost:18081/wopi/edit?WOPISrc=http%3A%2F%2F127.0.0.1%3A3001%2Fmock%2Fwopi%2Ffiles%2F1' \
+     --data-urlencode 'access_token=mock' | grep -i location       # 303，且不含 access_token
+# 用上一步 #s= 后的 sid：
+curl -s localhost:18081/api/doc/<sid> | head -c 200                # canWrite:true
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:18081/api/save/<sid>    # 200
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:18081/api/unlock/<sid>  # 204
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:18081/mock/wopi/files/1 \
+     -H 'X-WOPI-Override: LOCK' -H 'X-WOPI-Lock: outside'         # 200 ⇒ 锁确实已释放
+```
+
+注意 `WOPISrc` 要写**容器内**地址（`127.0.0.1:3001`），不是宿主映射端口——服务端是自己去回连宿主的。
+
+两个实测坑：
+
+- **podman 默认 OCI 格式会丢掉 `HEALTHCHECK`**（构建时警告 `HEALTHCHECK is not supported for OCI image format`，`podman image inspect` 里 `Healthcheck` 为 `<nil>`）。要保留就 `podman build --format docker`，或改用编排层的健康检查；`docker build` 不受影响。
+- 镜像约 629 MB（含 Monaco/KaTeX 等生产依赖与构建产物）。
+
+## CI
+
+两个互相独立的 workflow（刻意不揉在一个文件里）：
+
+| 文件 | 触发 | 做什么 |
+|---|---|---|
+| `.github/workflows/test.yml` | push 到 `main`、所有 PR | checkout → Node 24（npm 缓存）→ `npm ci` → `npm test` → `npm run build`（含入口资源校验） |
+| `.github/workflows/docker.yml` | 同上，但只在 Dockerfile/依赖/服务端/`client/**` 变更时 | buildx 构建镜像（`push:false`，gha 缓存），构建内含全部测试 |
+
+CI 里 `npm ci` 用 `--registry=https://registry.npmjs.org --replace-registry-host=always`，这样 lockfile 里的镜像源地址不影响公共 runner。构建产物不上传、不推镜像仓库；需要发布镜像时自行加 push 步骤与凭据。
 
 ## 接入 Cloudreve
 
@@ -72,11 +127,11 @@ PORT=3001 BASE_URL=http://127.0.0.1:3001 npm start
 ## 测试
 
 ```bash
-npm test        # 81 项：单元 + 真实 HTTP 替身 + 锁生命周期 + 预览/草稿/主题
+npm test        # 101 项：单元 + 真实 HTTP 替身 + 锁生命周期 + MOCK 宿主 + 预览/草稿/主题/语法守卫
 npm run build   # 测试 + 构建 + 入口资源校验
 ```
 
-测试覆盖了：双写者单锁与串行保存、只读与越权拒绝、断线合并、journal 恢复、外部修改阻塞、显式退出/异常断网/注销失败/并发 attach、公式渲染、草稿清理与恢复策略。
+测试覆盖了：双写者单锁与串行保存、只读与越权拒绝、断线合并、journal 恢复、外部修改阻塞与冲突端点、显式退出/异常断网/注销失败/并发 attach、MOCK 宿主的锁生命周期、公式渲染、未闭合围栏诊断、Monaco 语法守卫、草稿清理与恢复策略。
 
 ## 安全与边界
 
@@ -89,12 +144,16 @@ npm run build   # 测试 + 构建 + 入口资源校验
 ## 目录结构
 
 ```
-server.js               HTTP/shim/WOPI 上游
-collaboration.cjs       房间、Yjs、journal、锁生命周期
+server.js               HTTP/shim/WOPI 上游（含 MOCK 宿主的锁语义）
+collaboration.cjs       房间、Yjs、journal、锁生命周期、冲突合并
 server-state.cjs        宿主元数据映射
-client/src/             前端源码（预览、草稿、分析、主题、图片）
+client/src/             前端源码（预览、草稿、分析、语法守卫、主题、图片）
 client/workbench/       React 外壳与构建入口
-test/                   集成与生命周期测试
+test/                   集成、锁生命周期与 MOCK 宿主测试
+mock-data.md            MOCK=1 自测样本
+Dockerfile              多阶段镜像（构建阶段跑测试，运行阶段非 root）
+.github/workflows/      test.yml 与 docker.yml
+infra/frpc.example.toml 隧道配置示例（真实 frpc.toml 不入库）
 ```
 
 
@@ -125,4 +184,4 @@ test/                   集成与生命周期测试
 
 ## License
 
-未指定。仓库私有期间默认保留所有权利；对外发布前需补充许可证。
+尚未指定许可证。仓库当前为 public，在未加 LICENSE 前默认**保留所有权利**（可看不可用）。要开放使用请先补一份许可证。
