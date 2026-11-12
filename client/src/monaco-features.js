@@ -1,6 +1,9 @@
 import {analyzeMarkdown} from './markdown-analysis.js';
+import {registerSafeMarkdownTokens} from './markdown-grammar-guard.js';
 export function registerMarkdown(monaco){
  const disposables=[];
+ // Fix upstream's unguarded `<` -> HTML tag state before any model is tokenised (math notes use < a lot).
+ registerSafeMarkdownTokens(monaco);
  disposables.push(monaco.languages.registerDocumentSymbolProvider('markdown',{provideDocumentSymbols(model){const all=analyzeMarkdown(model.getValue()).headings,result=[],stack=[];for(let i=0;i<all.length;i++){const h=all[i];let end=model.getLineCount();for(let j=i+1;j<all.length;j++)if(all[j].level<=h.level){end=all[j].line-1;break;}const item={name:h.text||'（空标题）',detail:'#'+h.id,kind:monaco.languages.SymbolKind.String,range:new monaco.Range(h.line,1,Math.max(h.line,end),model.getLineMaxColumn(Math.max(h.line,end))),selectionRange:new monaco.Range(h.line,1,h.line,model.getLineMaxColumn(h.line)),children:[]};while(stack.length&&stack.at(-1).level>=h.level)stack.pop();(stack.length?stack.at(-1).item.children:result).push(item);stack.push({level:h.level,item});}return result;}}));
  const f=name=>'$'+'{'+name+'}',fence=String.fromCharCode(96).repeat(3);
  const snippets=[['heading','# '+f('1:标题'),'一级标题'],['link','['+f('1:文本')+']('+f('2:https://example.com')+')','链接'],['image','!['+f('1:说明')+']('+f('2:https://example.com/image.png')+')','图片'],['code',fence+f('1:language')+'\n'+f('2:code')+'\n'+fence,'代码块'],['table','| '+f('1:列1')+' | '+f('2:列2')+' |\n| --- | --- |\n| '+f('3:值1')+' | '+f('4:值2')+' |\n','表格'],['task','- [ ] '+f('1:待办事项'),'任务'],['math','$$\n'+f('1:E=mc^2')+'\n$$','公式'],['quote','> '+f('1:引用内容'),'引用']];
