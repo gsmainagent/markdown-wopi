@@ -95,6 +95,9 @@ test('discovery keeps the BASE_URL path prefix in every urlsrc', { timeout: 2000
     // 前缀不改变 zone 的推导：仍是 https 那一档，且只有一档
     assert.equal(res.body.split('<net-zone ').length - 1, 1);
     assert.match(res.body, /<net-zone name="external-https">/);
+    // 图标 URL 也得带前缀，且落在 /static/ 路由下（否则线上 404）
+    const icon = /favIconUrl="([^"]+)"/.exec(res.body)[1];
+    assert.equal(icon, 'https://host.example:3443/mdedit/static/icon-64.png');
   });
 });
 

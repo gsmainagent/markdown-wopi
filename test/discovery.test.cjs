@@ -71,7 +71,7 @@ test('discovery declares exactly one app so hosts create exactly one editor', { 
     assert.equal(count(res.body, '<app '), 1);
     assert.equal(count(res.body, '</wopi-discovery>'), 1);
     // 默认展示名不再是硬编码的 WopiMdEditor
-    assert.match(res.body, /<app name="Markdown Editor" favIconUrl="http:\/\/127\.0\.0\.1:\d+\/icon-64\.png">/);
+    assert.match(res.body, /<app name="Markdown Editor" favIconUrl="http:\/\/127\.0\.0\.1:\d+\/static\/icon-64\.png">/);
     assert.ok(!res.body.includes('WopiMdEditor'), 'placeholder app name is still being emitted');
     // md / markdown 各有 view(默认) + edit
     for (const ext of ['md', 'markdown']) {
@@ -92,7 +92,7 @@ test('discovery follows the BASE_URL scheme and escapes a custom app name', { ti
     assert.equal(res.status, 200);
     assert.equal(count(res.body, '<net-zone '), 1);
     assert.match(res.body, /<net-zone name="external-https">/);
-    assert.match(res.body, /<app name="A&amp;B &quot;C&quot; &lt;D&gt;" favIconUrl="https:\/\/md\.example\.org:3004\/icon-64\.png">/);
+    assert.match(res.body, /<app name="A&amp;B &quot;C&quot; &lt;D&gt;" favIconUrl="https:\/\/md\.example\.org:3004\/static\/icon-64\.png">/);
     assert.equal(count(res.body, 'https://md.example.org:3004/wopi/edit?WOPISrc=&lt;wopisrc&gt;'), 4);
     assert.ok(!res.body.includes('http://'), 'an http urlsrc leaked into an https deployment');
   });
@@ -149,7 +149,12 @@ test('the icon assets the entry page and discovery reference really ship', { tim
   await withDiscovery({}, async (res) => {
     const urls = [...res.body.matchAll(/favIconUrl="([^"]+)"/g)].map(m => m[1]);
     assert.equal(urls.length, 1, 'exactly one app means exactly one favIconUrl');
-    assert.match(urls[0], /^http:\/\/127\.0\.0\.1:\d+\/icon-64\.png$/);
+    assert.match(urls[0], /^http:\/\/127\.0\.0\.1:\d+\/static\/icon-64\.png$/);
+    // favIconUrl 指的必须是服务端真正会返回文件的路径。回归护栏：曾经写成
+    // base + '/icon-64.png'（前缀根），而图标只存在于 static/ 下 ⇒ 线上 404，
+    // 库里缓存了一张破图标。所以这里把「URL → 磁盘资产 → 构建搬运」三段串起来查。
+    assert.equal(new URL(urls[0]).pathname, '/static/icon-64.png', 'favIconUrl is not under the static route');
+    assert.ok(fs.existsSync(path.join(dir, 'icon-64.png')), 'favIconUrl points at an asset that does not exist');
     for (const u of [...res.body.matchAll(/(?:urlsrc|favIconUrl)="([^"]+)"/g)].map(m => m[1])) {
       assert.ok(!u.includes('lng'), 'Cloudreve blind-replaces the literal lng: ' + u);
     }

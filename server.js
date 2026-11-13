@@ -193,7 +193,9 @@ function discoveryXML(base) {
   const zoneName = WOPI_NET_ZONE || (/^https:/i.test(base) ? 'external-https' : 'external-http');
   const zone = (name) =>
     '  <net-zone name="' + name + '">\n' +
-    '    <app name="' + xmlAttr(WOPI_APP_NAME) + '" favIconUrl="' + xmlAttr(base + '/icon-64.png') + '">\n' +
+    // favIconUrl 必须指到图标真正被服务的路径：图标随构建产物落在 static/ 下，
+    // 写成 base + '/icon-64.png' 指向的是路径前缀根 ⇒ 404，Cloudreve 后台会显示破图标。
+    '    <app name="' + xmlAttr(WOPI_APP_NAME) + '" favIconUrl="' + xmlAttr(base + '/static/icon-64.png') + '">\n' +
     ['md', 'markdown'].map((ext) =>
       '      <action ext="' + ext + '" name="view" default="true" urlsrc="' + urlsrc + '"/>\n' +
       '      <action ext="' + ext + '" name="edit" urlsrc="' + urlsrc + '"/>'
