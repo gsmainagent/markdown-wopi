@@ -206,8 +206,8 @@ async function handleShim(req, res, u) {
   if (!token) return void log(null, req.method, u.pathname, send(res, 400, { ok: false, error: 'access_token required' }));
   const sid = newSid();
   sessions.set(sid, { wopisrc, token, ttl: ttl > Date.now() ? ttl : Date.now() + 3600e3, created: Date.now(), lockId: null, lockFailed: false });
-  // 旧的 ?ui=legacy 逃生门已删：它指向 /static/editor.html，而 CM6 时代的该产物早已不在
-  // static/ 里（线上实测 404）。现在无论带不带 ui 参数都进 Monaco 工作台。
+  // 旧的 ?ui=legacy 逃生门已删：它指向 CM6 时代的 editor 页面产物，那个文件早已不在
+  // 构建输出里（线上实测 404）。现在无论带不带 ui 参数都进 Monaco 工作台。
   var target = '/static/monaco-editor.html';
   // Cloudreve replaces the first literal darkmode with 2 (dark) or 1 (light). Forward only a validated cosmetic value.
   const requestedTheme = u.searchParams.get('theme') || '';

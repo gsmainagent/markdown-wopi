@@ -4,7 +4,7 @@
 // 我们曾同时声明 external-https + external-http 两个 zone ⇒ 一次导入就在文件菜单里
 // 出现两个同名编辑器（实测 GET /api/v4/admin/tool/wopi 返回 2 个 viewer）。
 const test = require('node:test'), assert = require('node:assert/strict'), http = require('node:http'),
-  path = require('node:path'), { spawn } = require('node:child_process'), { once } = require('node:events');
+  fs = require('node:fs'), path = require('node:path'), { spawn } = require('node:child_process'), { once } = require('node:events');
 
 const root = path.resolve(__dirname, '..');
 
@@ -98,19 +98,29 @@ test('discovery follows the BASE_URL scheme and escapes a custom app name', { ti
   });
 });
 
-test('the shim redirect target is an asset that actually ships', { timeout: 20000 }, async () => {
+test('the shim redirect target is the entry the build actually produces', { timeout: 20000 }, async () => {
+  // 源码层约束（不依赖构建产物，CI 在 npm run build 之前就跑测试，static/ 也不入库）：
+  // server.js 里出现的每个 /static/*.html 都必须是 finalize-build.mjs 会产出的入口。
+  // 这条拦的正是刚修掉的那类 bug：?ui=legacy 曾指向早已不再产出的 editor.html（线上 404）。
+  const produced = [...new Set([...fs.readFileSync(path.join(root, 'client/workbench/finalize-build.mjs'), 'utf8').matchAll(/\/static\/([\w.-]+\.html)/g)].map((m) => m[1]))];
+  assert.deepEqual(produced, ['monaco-editor.html'], 'build entry changed; update this guard');
+  const targetLine = fs.readFileSync(path.join(root, 'server.js'), 'utf8').match(/var target = '(\/static\/[\w.-]+\.html)'/);
+  assert.ok(targetLine, 'could not find the shim redirect target in server.js');
+  assert.equal(targetLine[1], '/static/' + produced[0], 'shim redirects to an entry the build does not produce');
+
   await withDiscovery({}, async (res, port) => {
     assert.equal(res.status, 200);
     for (const suffix of ['', '&ui=legacy']) {
-      // 回归护栏：?ui=legacy 曾指向 CM6 时代的 /static/editor.html，那个产物早已不在 static/ 里，
-      // 线上实测 404。现在任何 ui 参数都必须落在真实存在的入口页上。
       const shim = await post(port, '/wopi/edit?WOPISrc=' + encodeURIComponent('http://127.0.0.1:1/files/1') + '&access_token=x' + suffix);
       assert.equal(shim.status, 303, 'shim status for ' + (suffix || 'default'));
       const loc = shim.location || '';
       assert.match(loc, /^\/static\/monaco-editor\.html#s=/, 'unexpected redirect target: ' + loc);
       assert.ok(!loc.includes('access_token'), 'access_token leaked into the redirect');
-      const asset = await get('http://127.0.0.1:' + port + loc.split('#')[0]);
-      assert.equal(asset.status, 200, 'redirect points at a missing asset: ' + loc.split('#')[0]);
+      // 产物在树里（本地/已部署）才验真实可取；未构建的树里这条没意义
+      if (fs.existsSync(path.join(root, 'static', 'monaco-editor.html'))) {
+        const asset = await get('http://127.0.0.1:' + port + loc.split('#')[0]);
+        assert.equal(asset.status, 200, 'redirect points at a missing asset: ' + loc.split('#')[0]);
+      }
     }
   });
 });
