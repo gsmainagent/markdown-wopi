@@ -139,20 +139,31 @@ async function wopiUnlock(s) {
   }
 }
 
+const xmlAttr = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// Cloudreve 会为 discovery 里「每个 net-zone 的每个 app」各建一个 viewer：4.19.1 实测
+// （GET /api/v4/admin/tool/wopi?endpoint=…）两个 zone ⇒ 一次导入就得到两个同名编辑器。
+// 所以只声明一个 zone，名字跟 BASE_URL 的 scheme 走；拓扑特殊时用 WOPI_NET_ZONE 覆盖。
+const WOPI_APP_NAME = process.env.WOPI_APP_NAME || 'Markdown Editor';
+const WOPI_NET_ZONE = process.env.WOPI_NET_ZONE || '';
+
 function discoveryXML(base) {
-  const esc = base.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  // 注意：urlsrc 中不得出现子串 lng（Cloudreve 前端会盲替换字面量 lng / darkmode）
+  const esc = xmlAttr(base);
+  // urlsrc 两条硬约束：
+  // 1) 不得出现子串 lng —— Cloudreve 会无条件追加 lang=lng 并由前端盲替换字面量 lng；
+  // 2) theme=darkmode 不是「写死暗色」，而是 Cloudreve 自己 queryPlaceholders 里
+  //    THEME_ID → darkmode 的产物，由它前端再替换成真实主题（写成 <THEME_ID> 等价）。
   const urlsrc = esc + '/wopi/edit?WOPISrc=&lt;wopisrc&gt;&amp;theme=darkmode';
+  const zoneName = WOPI_NET_ZONE || (/^https:/i.test(base) ? 'external-https' : 'external-http');
   const zone = (name) =>
     '  <net-zone name="' + name + '">\n' +
-    '    <app name="WopiMdEditor">\n' +
+    '    <app name="' + xmlAttr(WOPI_APP_NAME) + '">\n' +
     ['md', 'markdown'].map((ext) =>
       '      <action ext="' + ext + '" name="view" default="true" urlsrc="' + urlsrc + '"/>\n' +
       '      <action ext="' + ext + '" name="edit" urlsrc="' + urlsrc + '"/>'
     ).join('\n') + '\n' +
     '    </app>\n' +
     '  </net-zone>';
-  return '<?xml version="1.0" encoding="utf-8"?>\n<wopi-discovery>\n' + zone('external-https') + '\n' + zone('external-http') + '\n</wopi-discovery>\n';
+  return '<?xml version="1.0" encoding="utf-8"?>\n<wopi-discovery>\n' + zone(zoneName) + '\n</wopi-discovery>\n';
 }
 
 const MIME = {
@@ -195,7 +206,9 @@ async function handleShim(req, res, u) {
   if (!token) return void log(null, req.method, u.pathname, send(res, 400, { ok: false, error: 'access_token required' }));
   const sid = newSid();
   sessions.set(sid, { wopisrc, token, ttl: ttl > Date.now() ? ttl : Date.now() + 3600e3, created: Date.now(), lockId: null, lockFailed: false });
-  var target = u.searchParams.get('ui') === 'legacy' ? '/static/editor.html' : '/static/monaco-editor.html';
+  // 旧的 ?ui=legacy 逃生门已删：它指向 /static/editor.html，而 CM6 时代的该产物早已不在
+  // static/ 里（线上实测 404）。现在无论带不带 ui 参数都进 Monaco 工作台。
+  var target = '/static/monaco-editor.html';
   // Cloudreve replaces the first literal darkmode with 2 (dark) or 1 (light). Forward only a validated cosmetic value.
   const requestedTheme = u.searchParams.get('theme') || '';
   const theme = /^(dark|2|true)$/i.test(requestedTheme) ? 'dark' : /^(light|1|false)$/i.test(requestedTheme) ? 'light' : '';
