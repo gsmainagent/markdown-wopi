@@ -187,6 +187,14 @@ curl -s https://wopi.example.com:3443/markdown/hosting/discovery | grep -c '<app
 
 其余接入步骤（导入 discovery、Cloudreve 侧配置）见下。
 
+## 图标与 `favIconUrl`
+
+入口图标是 `client/assets/icon/`（tracked）：`icon-16/32/48/64/192/512.png` + `favicon.ico`（16/32/48/64 四档合在一个 .ico 里）。构建时 `client/build.mjs` 把它们搬进 `static/` 根，`finalize-build.mjs` 将模板里的占位 `<link rel="icon" href="data:,">` 换成四条**相对**链接（16/32/shortcut .ico/apple-touch），因此子路径部署下浏览器解析出的地址天然带前缀（实测解析为 `<前缀>/static/icon-16.png` 等）。
+
+`/hosting/discovery` 的 `<app>` 同时带 `favIconUrl="<BASE_URL>/icon-64.png"`，Cloudreve 导入时把它原样存成 viewer 的 `icon` 字段（隔离实例实测：导入一次得 1 条，`display_name='Markdown Editor'`、`icon='…/mdedit/icon-64.png'`）。
+
+改图标只需替换 `client/assets/icon/` 里的文件；改 `favIconUrl` 或展示名后必须回 Cloudreve 后台**重新导入**才生效（导入时落库）。
+
 ## 测试
 
 ```bash

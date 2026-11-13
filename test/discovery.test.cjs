@@ -71,7 +71,7 @@ test('discovery declares exactly one app so hosts create exactly one editor', { 
     assert.equal(count(res.body, '<app '), 1);
     assert.equal(count(res.body, '</wopi-discovery>'), 1);
     // 默认展示名不再是硬编码的 WopiMdEditor
-    assert.match(res.body, /<app name="Markdown Editor">/);
+    assert.match(res.body, /<app name="Markdown Editor" favIconUrl="http:\/\/127\.0\.0\.1:\d+\/icon-64\.png">/);
     assert.ok(!res.body.includes('WopiMdEditor'), 'placeholder app name is still being emitted');
     // md / markdown 各有 view(默认) + edit
     for (const ext of ['md', 'markdown']) {
@@ -92,7 +92,7 @@ test('discovery follows the BASE_URL scheme and escapes a custom app name', { ti
     assert.equal(res.status, 200);
     assert.equal(count(res.body, '<net-zone '), 1);
     assert.match(res.body, /<net-zone name="external-https">/);
-    assert.match(res.body, /<app name="A&amp;B &quot;C&quot; &lt;D&gt;">/);
+    assert.match(res.body, /<app name="A&amp;B &quot;C&quot; &lt;D&gt;" favIconUrl="https:\/\/md\.example\.org:3004\/icon-64\.png">/);
     assert.equal(count(res.body, 'https://md.example.org:3004/wopi/edit?WOPISrc=&lt;wopisrc&gt;'), 4);
     assert.ok(!res.body.includes('http://'), 'an http urlsrc leaked into an https deployment');
   });
@@ -127,6 +127,31 @@ test('the shim redirect target is the entry the build actually produces', { time
         const asset = await get(resolved.origin + resolved.pathname);
         assert.equal(asset.status, 200, 'redirect points at a missing asset: ' + resolved.pathname);
       }
+    }
+  });
+});
+
+test('the icon assets the entry page and discovery reference really ship', { timeout: 20000 }, async () => {
+  // static/ 不入库也不由测试构建，所以这里查「源头资产 + 构建脚本」这一对不变量：
+  // 页面引用的每个图标文件都必须躺在 client/assets/icon 里，且 build.mjs 会把它们搬进 static/。
+  const dir = path.join(root, 'client', 'assets', 'icon');
+  const wanted = ['icon-16.png', 'icon-32.png', 'icon-48.png', 'icon-64.png', 'icon-192.png', 'icon-512.png', 'favicon.ico'];
+  for (const f of wanted) assert.ok(fs.existsSync(path.join(dir, f)), 'missing icon asset: ' + f);
+  const build = fs.readFileSync(path.join(root, 'client/build.mjs'), 'utf8');
+  assert.match(build, /client\/assets\/icon/, 'build.mjs no longer copies the icon assets into static/');
+  const finalize = fs.readFileSync(path.join(root, 'client/workbench/finalize-build.mjs'), 'utf8');
+  const linked = [...finalize.matchAll(/href="(icon-[0-9]+\.png|favicon\.ico)"/g)].map(m => m[1]);
+  for (const ref of linked) assert.ok(wanted.includes(ref), 'entry page links an icon that does not exist: ' + ref);
+  assert.ok(linked.length >= 3, 'expected the entry page to link several icon sizes, got ' + linked.length);
+  // 浏览器链接必须是相对路径：绝对路径会在 strip 前缀的反代下掉到站点根
+  assert.ok(!/href="\/static\/|href="\//.test(finalize), 'icon links must be relative to the document');
+
+  await withDiscovery({}, async (res) => {
+    const urls = [...res.body.matchAll(/favIconUrl="([^"]+)"/g)].map(m => m[1]);
+    assert.equal(urls.length, 1, 'exactly one app means exactly one favIconUrl');
+    assert.match(urls[0], /^http:\/\/127\.0\.0\.1:\d+\/icon-64\.png$/);
+    for (const u of [...res.body.matchAll(/(?:urlsrc|favIconUrl)="([^"]+)"/g)].map(m => m[1])) {
+      assert.ok(!u.includes('lng'), 'Cloudreve blind-replaces the literal lng: ' + u);
     }
   });
 });

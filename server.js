@@ -193,7 +193,7 @@ function discoveryXML(base) {
   const zoneName = WOPI_NET_ZONE || (/^https:/i.test(base) ? 'external-https' : 'external-http');
   const zone = (name) =>
     '  <net-zone name="' + name + '">\n' +
-    '    <app name="' + xmlAttr(WOPI_APP_NAME) + '">\n' +
+    '    <app name="' + xmlAttr(WOPI_APP_NAME) + '" favIconUrl="' + xmlAttr(base + '/icon-64.png') + '">\n' +
     ['md', 'markdown'].map((ext) =>
       '      <action ext="' + ext + '" name="view" default="true" urlsrc="' + urlsrc + '"/>\n' +
       '      <action ext="' + ext + '" name="edit" urlsrc="' + urlsrc + '"/>'
