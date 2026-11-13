@@ -94,9 +94,10 @@ jobs:
           context: .
           platforms: linux/amd64
           push: ${{ steps.mode.outputs.push }}
-          # provenance=false：只出一个普通 manifest，别带 attestation manifest list。
-          # 原因见 RUNBOOK §1：OCI/attestation 形态会丢/绕开 HEALTHCHECK，podman 与老客户端
-          # 拉取时最容易踩；本镜像自带 HEALTHCHECK，必须留在镜像配置里。
+          # provenance=false + sbom=false：只出一个镜像 manifest，不带 attestation 清单。
+          # 目的是拉取侧行为简单（podman/老客户端不会拿到多清单而报 unknown blob type）；
+          # HEALTHCHECK 在镜像 config 里保留（实测 mediaType 仍是 OCI manifest），
+          # 所以下面“拉回来断言”那步是真在测发布结果，而不是测构建假设。
           provenance: false
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}

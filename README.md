@@ -66,6 +66,19 @@ PORT=3001 BASE_URL=http://127.0.0.1:3001 npm start
 
 镜像为多阶段构建：构建阶段跑 `npm ci` → `npm run build`（含全部测试与入口资源校验）→ `npm prune --omit=dev`；运行阶段只带生产依赖、`server.js`/`server-state.cjs`/`collaboration.cjs`、构建产物 `static/` 与 mock 样本，以非 root 用户 `node` 运行，暴露 3001，journal 默认写在 `/data/rooms`。
 
+### 预构建镜像（GHCR）
+
+推 `main`、发 release、或手动 dispatch 时，CI 会把镜像发到 GHCR（公开包，无需登录）：
+
+```bash
+docker pull ghcr.io/gsmainagent/markdown-wopi:latest        # 默认分支
+docker pull ghcr.io/gsmainagent/markdown-wopi:sha-<短 sha>   # 锁定具体构建
+```
+
+tag 规则：`main`、`latest`（仅默认分支）、`sha-<短 sha>`；发 GitHub Release 时额外打 semver tag（当前尚未建 release，所以现在只有这三个）。PR 只构建不推送。
+
+拉不动先分清是 ACL 还是出网：包属性是 public，所以 `502` / TLS `unexpected eof` 属于**你这台机器没有可用的 `ghcr.io` 出口**（本机实测：`api.github.com` 走代理可通，而 `ghcr.io` 经代理与直连均不可达）⇒ 这种环境下用下面的 `docker build --build-arg NPM_REGISTRY=…` 自行构建。
+
 ```bash
 # 构建（CI 用默认 registry；国内网络可换镜像源）
 docker build -t markdown-wopi:local .
@@ -112,9 +125,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:18081/mock/wopi/files
 | 文件 | 触发 | 做什么 |
 |---|---|---|
 | `.github/workflows/test.yml` | push 到 `main`、所有 PR | checkout → Node 24（npm 缓存）→ `npm ci` → `npm test` → `npm run build`（含入口资源校验） |
-| `.github/workflows/docker.yml` | 同上，但只在 Dockerfile/依赖/服务端/`client/**` 变更时 | buildx 构建镜像（`push:false`，gha 缓存），构建内含全部测试 |
+| `.github/workflows/docker.yml` | 同上路径过滤；另加 `release: published` 与 `workflow_dispatch` | buildx 构建；PR 只构建不推，`main`/release/dispatch 用内置 `GITHUB_TOKEN` 推 GHCR（`permissions: packages: write`，**不需要仓库 secret**）；最后一步把镜像拉回来断言 `HEALTHCHECK` 与非 root `User` 仍在 |
 
-CI 里 `npm ci` 用 `--registry=https://registry.npmjs.org --replace-registry-host=always`，这样 lockfile 里的镜像源地址不影响公共 runner。构建产物不上传、不推镜像仓库；需要发布镜像时自行加 push 步骤与凭据。
+CI 里 `npm ci` 用 `--registry=https://registry.npmjs.org --replace-registry-host=always`，这样 lockfile 里的镜像源地址不影响公共 runner。测试工作流不上传构建产物；镜像只发 GHCR（发布方式与坑见上节）。
 
 ## 接入 Cloudreve
 
