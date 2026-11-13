@@ -102,6 +102,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Image metadata (per architecture)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          tags: |
+            type=raw,value=tmp-${{ github.sha }}-${{ matrix.arch }}
+
       - name: Build and push linux/${{ matrix.arch }}
         uses: docker/build-push-action@v6
         with:
@@ -109,6 +117,14 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           push: ${{ steps.mode.outputs.push }}
           tags: ${{ steps.mode.outputs.push == 'true' && format('{0}/{1}:tmp-{2}-{3}', env.REGISTRY, env.IMAGE, github.sha, matrix.arch) || '' }}
+          # labels 在这里上（而不是 merge 作业）：imagetools create 只把子清单按 digest 引用进
+          # index，不会重写子镜像的 config。没这几行镜像里就没有
+          # org.opencontainers.image.revision/source（改多架构时我丢过一次，已实测到）。
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.title=markdown-wopi
           # 单架构、单清单：provenance/sbom 关掉，拉取侧不会遇到 attestation 多清单
           provenance: false
           sbom: false
@@ -193,4 +209,7 @@ jobs:
           hc="$(docker image inspect "$ref" --format '{{json .Config.Healthcheck}}')"
           echo "healthcheck (native pull): $hc"
           { [ "$hc" != '<no value>' ] && [ "$hc" != 'null' ]; } || { echo 'HEALTHCHECK lost in the published image'; exit 1; }
+          labels="$(docker image inspect "$ref" --format '{{json .Config.Labels}}')"
+          echo "labels: $labels"
+          grep -q 'org.opencontainers.image.revision' <<<"$labels" || { echo 'published image lost its provenance labels'; exit 1; }
           echo "done: $ref"

@@ -125,6 +125,25 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:18081/mock/wopi/files
 - **podman 默认 OCI 格式会丢掉 `HEALTHCHECK`**（构建时警告 `HEALTHCHECK is not supported for OCI image format`，`podman image inspect` 里 `Healthcheck` 为 `<nil>`）。要保留就 `podman build --format docker`，或改用编排层的健康检查；`docker build` 不受影响。
 - 镜像约 629 MB（含 Monaco/KaTeX 等生产依赖与构建产物）。
 
+### 生产部署（容器）
+
+现成样例：[`infra/compose.example.yaml`](infra/compose.example.yaml)（拷走改名 `compose.yaml`，填尖括号项）。上线四步：
+
+1. **填两个必填项**：`BASE_URL`（浏览器实际访问的 scheme/host/port，必须完全一致）与 `ALLOWED_ORIGINS`（Cloudreve 站点地址）；对外只绑 `127.0.0.1:3001`，公网经反代或 frp（模板 `infra/frpc.example.toml`）。
+2. **起服务并自检**：`docker compose up -d`（podman 用 `podman-compose up -d`），然后
+   ```bash
+   curl -s localhost:3001/healthz                                   # ok
+   curl -s localhost:3001/hosting/discovery | grep -c '<app '        # 必须是 1
+   ```
+   第二条不是形式：同一份 discovery 里多声明一个 net-zone，Cloudreve 就会多建一个同名编辑器条目。
+3. **在 Cloudreve 后台只导入一次**：删掉历史重复的 WOPI 应用条目 → 导入 `<BASE_URL>/hosting/discovery` → 把 `md`/`markdown` 的默认应用指向新建的那条。每次导入都生成**新 uuid**，所以重复导入会累积条目，默认应用也需要重新指。
+4. **升级与回滚都是换 tag**：把 `image:` 改成 `:sha-<短 sha>` 再 `up -d`。**别删数据卷** —— `/data/rooms` 里是协作 journal，丢了未落盘的协作内容就回不来。
+
+两个容易踩的点：
+
+- `WOPI_APP_NAME`（discovery 里的展示名）与 `WOPI_NET_ZONE` 是**导入时**写进 Cloudreve 数据库的；改了环境变量必须回后台**重新导入**才生效，光重启服务不会改已存的条目。
+- 镜像内的 `HEALTHCHECK` 只在 Docker 侧生效；podman 不消费它，compose 样例里已显式写了一份 `healthcheck:`，直接用那份。
+
 ## CI
 
 两个互相独立的 workflow（刻意不揉在一个文件里）：

@@ -1,0 +1,45 @@
+# 生产部署样例（容器版）。用法：拷到你的部署位置改名 compose.yaml，填 <尖括号> 项。
+# 镜像双架构（linux/amd64 + linux/arm64），按机器自动选。
+# 国内或 GHCR 直连不通时，把 image 的仓库前缀换成 ghcr.nju.edu.cn（其余不变）。
+#
+#   docker compose -f compose.yaml up -d
+#   curl -s http://127.0.0.1:3001/healthz
+services:
+  wopi-md-editor:
+    image: ghcr.io/gsmainagent/markdown-wopi:latest        # 上线建议钉到具体构建：:sha-<短 sha>
+    restart: unless-stopped
+    # 只绑回环；公网经已有的反向代理或 frp（见 infra/frpc.example.toml）
+    ports:
+      - '127.0.0.1:3001:3001'
+    environment:
+      # 必须与浏览器实际访问的 scheme/host/port 完全一致：Origin 校验与 discovery 里的
+      # urlsrc、以及重定向后的 #s=<sid> 都由它拼出来。末尾斜杠会被忽略。
+      BASE_URL: https://<编辑器公网域名>
+      # Cloudreve 的站点地址（发起 iframe 的那一侧），逗号分隔可写多个。
+      ALLOWED_ORIGINS: https://<你的cloudreve域名>
+      # WOPI 展示名 / net-zone：只在需要偏离默认时设置。
+      # 名称是「导入时」落进 Cloudreve 数据库的，改了要回后台重新导入才生效。
+      #WOPI_APP_NAME: Markdown Editor
+      #WOPI_NET_ZONE: external-https
+      # 协作 journal 落盘目录（容器内路径，必须挂卷，见下面 volumes）
+      COLLAB_DATA_DIR: /data/rooms
+      # 自动保存/续锁节流与断线宽限，一般不用动
+      #COLLAB_SAVE_MS: 1000
+      #LOCK_REFRESH_MS: 240000
+      #COLLAB_GRACE_MS: 15000
+      # 只想自测、不接宿主时打开：使用镜像内置的 mock-data.md，不需要 Cloudreve
+      #MOCK: '1'
+      #MOCK_FILE: /data/mock-data.md
+    volumes:
+      # journal 不可丢：重启后靠它恢复未落盘的协作内容
+      - wopi-md-editor-data:/data
+    # 镜像自带 HEALTHCHECK；容器编排层建议再显式声明一份（podman 不消费镜像内 HEALTHCHECK）
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:3001/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  wopi-md-editor-data:
