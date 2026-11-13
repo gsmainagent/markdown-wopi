@@ -8,5 +8,9 @@ candidate-manifest.json
 RELEASE.json
 README.candidate.md
 infra/frpc.toml
+infra/frpc.example.toml
+infra/nginx.example.conf
+# 反代与隧道配置属于部署方环境：仓库只带 compose 示例，
+# 上面两个文件留在本地 RUNBOOK 体系里维护，别再加回来。
 deployment-*/
 .DS_Store

@@ -8,7 +8,7 @@ services:
   wopi-md-editor:
     image: ghcr.io/gsmainagent/markdown-wopi:latest        # 上线建议钉到具体构建：:sha-<短 sha>
     restart: unless-stopped
-    # 只绑回环；公网经已有的反向代理或 frp（见 infra/frpc.example.toml）
+    # 只绑回环；公网经你自己的反向代理或隧道暴露（配置属部署方环境，仓库不携带）
     ports:
       - '127.0.0.1:3001:3001'
     environment:

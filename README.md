@@ -129,7 +129,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:18081/mock/wopi/files
 
 现成样例：[`infra/compose.example.yaml`](infra/compose.example.yaml)（拷走改名 `compose.yaml`，填尖括号项）。上线四步：
 
-1. **填两个必填项**：`BASE_URL`（浏览器实际访问的 scheme/host/port，必须完全一致）与 `ALLOWED_ORIGINS`（Cloudreve 站点地址）；对外只绑 `127.0.0.1:3001`，公网经反代或 frp（模板 `infra/frpc.example.toml`）。
+1. **填两个必填项**：`BASE_URL`（浏览器实际访问的 scheme/host/port，必须完全一致）与 `ALLOWED_ORIGINS`（Cloudreve 站点地址）；对外只绑 `127.0.0.1:3001`，公网经你自己的反向代理或隧道暴露（反代/隧道配置属部署方环境，仓库不携带，必需项见下节）。
 2. **起服务并自检**：`docker compose up -d`（podman 用 `podman-compose up -d`），然后
    ```bash
    curl -s localhost:3001/healthz                                   # ok
@@ -164,7 +164,7 @@ BASE_URL=https://wopi.example.com:3443/markdown     # 子路径部署
 ALLOWED_ORIGINS=https://wopi.example.com:3443       # 只比 origin，路径会被忽略
 ```
 
-反代两种写法都支持（后端会按 `BASE_URL` 的前缀自己挂载，也会接受被剥掉前缀的转发）：完整可抄的配置在 **[`infra/nginx.example.conf`](infra/nginx.example.conf)**，含子路径挂载、独立域名挂载、WS `Upgrade`/`Connection` 映射、超时下限与自检命令。要点只有两条：
+反向代理的两种写法都支持（后端会按 `BASE_URL` 的前缀自己挂载，也接受被剥掉前缀的转发）。挂到子路径时最少要这几项：
 
 ```nginx
 location /markdown/ {
@@ -216,8 +216,7 @@ test/                   集成、锁生命周期与 MOCK 宿主测试
 mock-data.md            MOCK=1 自测样本
 Dockerfile              多阶段镜像（构建阶段跑测试，运行阶段非 root）
 .github/workflows/      test.yml 与 docker.yml
-infra/frpc.example.toml 隧道配置示例（真实 frpc.toml 不入库）
-infra/nginx.example.conf 反代示例（子路径 + 独立域名两种挂法）
+infra/compose.example.yaml 容器编排示例（反代/隧道配置属部署方环境，不入库）
 ```
 
 
