@@ -1,8 +1,11 @@
 name: docker
 
-# 分两种模式（刻意如此）：
-#   pull_request  → 只构建、不推送（没有凭据，也不该产生制品）
-#   push(main) / release / workflow_dispatch → 构建并推 ghcr.io
+# 双架构（linux/amd64 + linux/arm64）发布，两种模式（刻意如此）：
+#   pull_request            → 两个架构各自只构建，不推送（没有凭据，也不该产生制品）
+#   push(main)/release/手动 → 每架构先推临时 tag :tmp-<full-sha>-<arch>，merge 作业再把两者
+#                             合成一份多架构 manifest 打到正式 tag
+# 架构断言分两层：每个 build 作业用 --load 把**本架构**镜像装进 docker 查 config；
+# merge 作业再确认远端 manifest list 同时含 amd64/arm64，并把正式 tag 拉回来查一次。
 # GHCR 用内置 GITHUB_TOKEN，无需仓库 secret。
 
 on:
@@ -51,9 +54,34 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    # amd64 用 x86 runner；arm64 优先原生 ARM runner（public 仓库免费）。
+    # 若 ubuntu-24.04-arm 这个 label 不可用，就改回 ubuntu-latest —— 那时 QEMU 一步会接手。
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Is this build native?
+        id: native
+        run: |
+          m="$(uname -m)"
+          echo "machine=$m" >> "$GITHUB_OUTPUT"
+          if { [ "$m" = "aarch64" ] && [ "${{ matrix.arch }}" = "arm64" ]; } ||
+             { [ "$m" = "x86_64" ] && [ "${{ matrix.arch }}" = "amd64" ]; }; then
+            echo "emulate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "emulate=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU (only for the non-native case)
+        if: steps.native.outputs.emulate == 'true'
+        uses: docker/setup-qemu-action@v3
+        with:
+          image: tonistiigi/binfmt:latest
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v3
 
@@ -74,49 +102,95 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
+      - name: Build and push linux/${{ matrix.arch }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: ${{ steps.mode.outputs.push }}
+          tags: ${{ steps.mode.outputs.push == 'true' && format('{0}/{1}:tmp-{2}-{3}', env.REGISTRY, env.IMAGE, github.sha, matrix.arch) || '' }}
+          # 单架构、单清单：provenance/sbom 关掉，拉取侧不会遇到 attestation 多清单
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - name: Assert this architecture's image config
+        run: |
+          set -euo pipefail
+          # --load 只把镜像导入 docker 存储，不需要执行它 ⇒ QEMU 场景也能查 config
+          docker buildx build --platform linux/${{ matrix.arch }} --load -t mw-check:${{ matrix.arch }} .
+          img="docker image inspect mw-check:${{ matrix.arch }}"
+          arch="$($img --format '{{.Architecture}}')"
+          echo "architecture: $arch"
+          [ "$arch" = "${{ matrix.arch }}" ] || { echo "wrong arch in image: $arch"; exit 1; }
+          hc="$($img --format '{{json .Config.Healthcheck}}')"
+          echo "healthcheck: $hc"
+          { [ "$hc" != '<no value>' ] && [ "$hc" != 'null' ]; } || { echo 'HEALTHCHECK missing'; exit 1; }
+          uid="$($img --format '{{.Config.User}}')"
+          echo "runs as user: $uid"
+          [ -n "$uid" ] || { echo 'image is not running as a non-root user'; exit 1; }
+          os="$($img --format '{{.Os}}')"
+          echo "os: $os"
+          [ "$os" = 'linux' ]
+
+  merge:
+    needs: build
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (official tags)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
             type=raw,value=${{ github.event.inputs.extra_tag }},enable=${{ github.event.inputs.extra_tag != '' }}
 
-      - name: Build (and optionally push) image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: ${{ steps.mode.outputs.push }}
-          # provenance=false + sbom=false：只出一个镜像 manifest，不带 attestation 清单。
-          # 目的是拉取侧行为简单（podman/老客户端不会拿到多清单而报 unknown blob type）；
-          # HEALTHCHECK 在镜像 config 里保留（实测 mediaType 仍是 OCI manifest），
-          # 所以下面“拉回来断言”那步是真在测发布结果，而不是测构建假设。
-          provenance: false
-          sbom: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Pull it back and assert HEALTHCHECK survived
-        if: steps.mode.outputs.push == 'true'
+      - name: Merge linux/amd64 + linux/arm64 into one manifest list
+        env:
+          OFFICIAL_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          ref="$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | grep -m1 ':latest$' || true)"
-          [ -n "$ref" ] || ref="$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | sed -n '1p')"
-          echo "verifying $ref"
-          docker buildx imagetools inspect "$ref" --raw | head -4
+          base="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          # 注意：:tmp-<sha>-<arch> 两个 tag 是**承重**的 —— imagetools create 不子复制子清单，
+          # 正式清单直接按 digest 引用它们。删掉 tmp tag 会让多架构清单变成悬空引用，故不清理。
+          refs=()
+          for arch in amd64 arm64; do
+            ref="$base:tmp-${{ github.sha }}-$arch"
+            docker buildx imagetools inspect "$ref" >/dev/null   # 少任何一个都直接失败，别合成半份
+            refs+=("$ref")
+          done
+          args=()
+          while IFS= read -r t; do
+            [ -n "$t" ] && args+=(-t "$t")
+          done <<< "$OFFICIAL_TAGS"
+          echo "merging ${refs[*]} -> ${args[*]}"
+          docker buildx imagetools create "${args[@]}" "${refs[@]}"
+
+      - name: Pull it back and assert both arches survived
+        env:
+          OFFICIAL_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          ref="$(printf '%s\n' "$OFFICIAL_TAGS" | sed -n '1p')"
+          docker buildx imagetools inspect "$ref" | tee /tmp/inspect.txt
+          grep -Eq 'linux/amd64' /tmp/inspect.txt || { echo 'amd64 missing from the list'; exit 1; }
+          grep -Eq 'linux/arm64' /tmp/inspect.txt || { echo 'arm64 missing from the list'; exit 1; }
           docker pull -q "$ref" >/dev/null
           hc="$(docker image inspect "$ref" --format '{{json .Config.Healthcheck}}')"
-          echo "healthcheck: $hc"
-          [ "$hc" != '<no value>' ] && [ "$hc" != 'null' ] || { echo 'HEALTHCHECK lost in the published image'; exit 1; }
-          uid="$(docker image inspect "$ref" --format '{{.Config.User}}')"
-          echo "runs as user: $uid"
-          [ -n "$uid" ] || { echo 'published image is not running as a non-root user'; exit 1; }
+          echo "healthcheck (native pull): $hc"
+          { [ "$hc" != '<no value>' ] && [ "$hc" != 'null' ]; } || { echo 'HEALTHCHECK lost in the published image'; exit 1; }
+          echo "done: $ref"
