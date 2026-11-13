@@ -104,9 +104,12 @@ test('the shim redirect target is the entry the build actually produces', { time
   // 这条拦的正是刚修掉的那类 bug：?ui=legacy 曾指向早已不再产出的 editor.html（线上 404）。
   const produced = [...new Set([...fs.readFileSync(path.join(root, 'client/workbench/finalize-build.mjs'), 'utf8').matchAll(/\/static\/([\w.-]+\.html)/g)].map((m) => m[1]))];
   assert.deepEqual(produced, ['monaco-editor.html'], 'build entry changed; update this guard');
-  const targetLine = fs.readFileSync(path.join(root, 'server.js'), 'utf8').match(/var target = '(\/static\/[\w.-]+\.html)'/);
+  const targetLine = fs.readFileSync(path.join(root, 'server.js'), 'utf8').match(/var target = '([^']*\.html)'/);
   assert.ok(targetLine, 'could not find the shim redirect target in server.js');
-  assert.equal(targetLine[1], '/static/' + produced[0], 'shim redirects to an entry the build does not produce');
+  // 跳转必须是**相对**写法（根绝对路径会掉出反代前缀），且相对 /wopi/edit 解析后
+  // 正好落在构建产出的入口上。
+  assert.ok(!targetLine[1].startsWith('/'), 'shim redirect must stay relative, got ' + targetLine[1]);
+  assert.equal(new URL(targetLine[1], 'http://h/wopi/edit').pathname, '/static/' + produced[0], 'shim redirects to an entry the build does not produce');
 
   await withDiscovery({}, async (res, port) => {
     assert.equal(res.status, 200);
@@ -114,12 +117,15 @@ test('the shim redirect target is the entry the build actually produces', { time
       const shim = await post(port, '/wopi/edit?WOPISrc=' + encodeURIComponent('http://127.0.0.1:1/files/1') + '&access_token=x' + suffix);
       assert.equal(shim.status, 303, 'shim status for ' + (suffix || 'default'));
       const loc = shim.location || '';
-      assert.match(loc, /^\/static\/monaco-editor\.html#s=/, 'unexpected redirect target: ' + loc);
+      // 跳转是相对写法（见 server.js 注释），所以按浏览器的解析规则还原成真实地址再断言
+      const resolved = new URL(loc, 'http://127.0.0.1:' + port + '/wopi/edit');
+      assert.equal(resolved.pathname, '/static/monaco-editor.html', 'unexpected redirect target: ' + loc);
+      assert.match(resolved.hash, /^#s=/, 'sid missing from ' + loc);
       assert.ok(!loc.includes('access_token'), 'access_token leaked into the redirect');
       // 产物在树里（本地/已部署）才验真实可取；未构建的树里这条没意义
       if (fs.existsSync(path.join(root, 'static', 'monaco-editor.html'))) {
-        const asset = await get('http://127.0.0.1:' + port + loc.split('#')[0]);
-        assert.equal(asset.status, 200, 'redirect points at a missing asset: ' + loc.split('#')[0]);
+        const asset = await get(resolved.origin + resolved.pathname);
+        assert.equal(asset.status, 200, 'redirect points at a missing asset: ' + resolved.pathname);
       }
     }
   });

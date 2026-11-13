@@ -15,7 +15,7 @@ class Journal{
  append(update){const h=Buffer.alloc(4);h.writeUInt32LE(update.length);const fd=fs.openSync(this.log,'a',0o600);try{fs.writeSync(fd,Buffer.concat([h,Buffer.from(update)]));fs.fdatasyncSync(fd);}finally{fs.closeSync(fd);}}
  checkpoint(doc,meta){atomic(this.snapshot,Y.encodeStateAsUpdate(doc));atomic(this.meta,JSON.stringify(meta));atomic(this.log,Buffer.alloc(0));}
 }
-function createCollaboration({server,sessions,live,checkInfo,getContents,lock,refresh,put,unlock,dataDir,origin,saveDelay=1000,renewMs=240000,graceMs=15000}){
+function createCollaboration({server,sessions,live,checkInfo,getContents,lock,refresh,put,unlock,dataDir,origin,sameOrigin=(a,b)=>String(a||'')===String(b||''),stripPrefix=p=>String(p||'/'),saveDelay=1000,renewMs=240000,graceMs=15000}){
  fs.mkdirSync(dataDir,{recursive:true,mode:0o700});const rooms=new Map(),pending=new Map();let stopping=false;const wss=new WebSocketServer({noServer:true,maxPayload:MAX_UPDATE});
  function status(r){return {revision:r.revision,persistedRevision:r.persistedRevision,dirty:r.revision!==r.persistedRevision,saving:!!r.saving,releasing:!!r.releasing,blocked:r.blocked||null,error:r.error||null,savedAt:r.savedAt||null,clients:r.connections.size,persistedHash:r.baseHash};}
  function sendStatus(r,ws){const bytes=packet(STATUS,e=>enc.writeVarString(e,JSON.stringify(status(r))));if(ws){if(ws.readyState===1)ws.send(bytes);}else for(const c of r.connections)if(c.readyState===1)c.send(bytes);}
@@ -139,7 +139,7 @@ function createCollaboration({server,sessions,live,checkInfo,getContents,lock,re
  }
 
  server.on('upgrade',async(req,socket,head)=>{
-  try{const u=new URL(req.url,'http://localhost');const match=u.pathname.match(/^\/collab\/([a-f0-9]{64})$/);if(!match)throw Error('not found');if(req.headers.origin&&req.headers.origin!==origin(req))throw Error('origin forbidden');const sid=u.searchParams.get('sid'),s=sessions.get(sid);if(!s||!live(s))throw Error('session invalid');const a=await attach(s,sid);if(a.room.key!==match[1])throw Error('room forbidden');
+  try{const u=new URL(req.url,'http://localhost');const match=stripPrefix(u.pathname).match(/^\/collab\/([a-f0-9]{64})$/);if(!match)throw Error('not found');if(req.headers.origin&&!sameOrigin(req.headers.origin,origin(req)))throw Error('origin forbidden');const sid=u.searchParams.get('sid'),s=sessions.get(sid);if(!s||!live(s))throw Error('session invalid');const a=await attach(s,sid);if(a.room.key!==match[1])throw Error('room forbidden');
    wss.handleUpgrade(req,socket,head,ws=>{const r=a.room;ws.sid=sid;ws.canWrite=a.canWrite;ws.identity=identity(s,a.info);ws.alive=true;r.connections.add(ws);r.lastSeen=Date.now();
     ws.on('pong',()=>ws.alive=true);ws.on('message',data=>{try{if(ws.explicitlyClosed||r.releasing)return;if(!live(s))return ws.close(4401,'session expired');s.lastSeen=r.lastSeen=Date.now();const d=dec.createDecoder(new Uint8Array(data)),type=dec.readVarUint(d);
      if(type===0){const kind=dec.readVarUint(d);if(kind===sync.messageYjsSyncStep1){const sv=dec.readVarUint8Array(d);ws.send(packet(0,e=>sync.writeSyncStep2(e,r.doc,sv)));}

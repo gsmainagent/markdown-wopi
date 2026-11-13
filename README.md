@@ -157,11 +157,41 @@ CI 里 `npm ci` 用 `--registry=https://registry.npmjs.org --replace-registry-ho
 
 ## 接入 Cloudreve
 
-1. 在 Cloudreve 后台的 WOPI 应用里导入本服务的 discovery：`<BASE_URL>/hosting/discovery`。
-2. 让 Cloudreve 能访问 `BASE_URL`，并让浏览器也能访问同一地址（Origin 校验基于 `BASE_URL`）。
-3. 从 Cloudreve 打开 Markdown 文件；编辑器通过 shim 换取一次性 sid，后续请求只带 sid。
+可以挂在站点根，也可以挂在子路径下（`https://<域名>/<前缀>/`）。`BASE_URL` 原样决定一切：
 
-注意：`urlsrc` 中不能出现子串 `lng`，Cloudreve 前端会盲目替换该字面量。
+```bash
+BASE_URL=https://wopi.example.com:3443/markdown     # 子路径部署
+ALLOWED_ORIGINS=https://wopi.example.com:3443       # 只比 origin，路径会被忽略
+```
+
+反代两种写法都支持（后端会按 `BASE_URL` 的前缀自己挂载，也会接受被剥掉前缀的转发）：
+
+```nginx
+# 写法 A：剥掉前缀（proxy_pass 结尾带 /）
+location /markdown/ {
+    proxy_pass http://127.0.0.1:3001/;
+    proxy_set_header Host $proxy_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;      # /collab 的 WebSocket 必须带
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 300s;
+}
+
+# 写法 B：保留前缀（结尾不带 /）—— 同样可用，后端自己剥
+#   proxy_pass http://127.0.0.1:3001;
+```
+
+写法 B 的失败形态值得记住：如果跑的是不认识前缀的旧镜像，`/markdown/hosting/discovery` 会返回 **`{"ok":false}`**（我们的 404），而不是 nginx 的 HTML 404 —— 看到这个 JSON 就说明请求已经打到应用、只是前缀没被认。
+
+上线后自检：
+
+```bash
+curl -s https://wopi.example.com:3443/markdown/healthz                       # ok
+curl -s https://wopi.example.com:3443/markdown/hosting/discovery | grep -c '<app '   # 必须是 1
+```
+
+其余接入步骤（导入 discovery、Cloudreve 侧配置）见下。
 
 ## 测试
 

@@ -12,7 +12,44 @@ const PRESENCE_MS=12*60000;
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const MOCK = process.env.MOCK === '1';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/+$/, '');
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+// Origin 只由 scheme/host/port 构成，永远不带路径。BASE_URL 允许挂子路径前缀
+// （反代 strip 前缀的部署方式），所以比较前必须把两边都收敛成 origin，否则
+// “Origin 与带路径的 BASE_URL 不相等”会让握手永远失败（实测 WS 403）。
+function originOf(value) {
+  try {
+    const u = new URL(String(value).trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    const host = u.hostname.toLowerCase();
+    const port = u.port && !((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) ? ':' + u.port : '';
+    return u.protocol + '//' + (host.includes(':') ? '[' + host + ']' : host) + port;
+  } catch {
+    return '';
+  }
+}
+const sameOrigin = (a, b) => { const x = originOf(a), y = originOf(b); return !!x && x === y; };
+// 配置里写带路径/默认端口/大写的值都按 origin 处理；解析不出来的条目不得悄悄放宽门禁，
+// 所以“有没有配”按原始列表判断，“匹不匹配”按规范化集合判断。
+// 挂载前缀：BASE_URL 里可以带路径（如 https://wopi.example:3443/markdown）。
+// 反代到底剥不剥这个前缀，两种写法都有人在用（proxy_pass 结尾有没有 /），
+// 这里两种都接住：进来的路径若以前缀开头就先剥掉，否则原样走根路由。
+// 不这么做的话，保留前缀的转发会让我们只注册了根路径的路由全部 404（实测踩过）。
+const ROUTE_PREFIX = (() => {
+  try {
+    const pathname = new URL(BASE_URL).pathname.replace(/\/+$/, '');
+    return pathname.startsWith('/') && pathname !== '/' ? pathname : '';
+  } catch { return ''; }
+})();
+const stripPrefix = pathname => {
+  const raw = String(pathname || '/');
+  if (ROUTE_PREFIX && (raw === ROUTE_PREFIX || raw.startsWith(ROUTE_PREFIX + '/'))) {
+    const rest = raw.slice(ROUTE_PREFIX.length);
+    return rest.startsWith('/') ? rest : '/' + rest;
+  }
+  return raw;
+};
+const ALLOWED_ORIGINS_RAW = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const ALLOWED_ORIGINS = new Set(ALLOWED_ORIGINS_RAW.map(originOf).filter(Boolean));
+ALLOWED_ORIGINS_RAW.forEach((raw, i) => { if (!ALLOWED_ORIGINS.has(originOf(raw))) console.warn('ALLOWED_ORIGINS 条目无法解析为 origin，已忽略: ' + raw); });
 const STATIC_DIR = path.join(__dirname, 'static');
 const MOCK_FILE = process.env.MOCK_FILE || path.join(__dirname, 'mock-data.md');
 // MOCK host keeps one in-memory lock so the self-test can exercise the real lock lifecycle.
@@ -189,9 +226,10 @@ function serveStatic(res, pathname) {
 }
 
 async function handleShim(req, res, u) {
-  if (ALLOWED_ORIGINS.length) {
+  if (ALLOWED_ORIGINS_RAW.length) {
     const org = req.headers.origin;
-    if (org && !ALLOWED_ORIGINS.includes(org)) return void log(null, req.method, u.pathname, send(res, 403, { ok: false, error: 'origin not allowed' }));
+    // 带 Origin 就必须命中允许列表；命中不了（含畸形值）一律拒，绝不 fail open。
+    if (org && !ALLOWED_ORIGINS.has(originOf(org))) return void log(null, req.method, u.pathname, send(res, 403, { ok: false, error: 'origin not allowed' }));
   }
   let wopisrc = u.searchParams.get('WOPISrc');
   let token = u.searchParams.get('access_token') || '';
@@ -208,7 +246,10 @@ async function handleShim(req, res, u) {
   sessions.set(sid, { wopisrc, token, ttl: ttl > Date.now() ? ttl : Date.now() + 3600e3, created: Date.now(), lockId: null, lockFailed: false });
   // 旧的 ?ui=legacy 逃生门已删：它指向 CM6 时代的 editor 页面产物，那个文件早已不在
   // 构建输出里（线上实测 404）。现在无论带不带 ui 参数都进 Monaco 工作台。
-  var target = '/static/monaco-editor.html';
+  // 相对跳转：请求来自 <前缀>/wopi/edit，`../static/...` 由浏览器解析成
+  // <前缀>/static/...；根部署时前缀为空，同样解析到 /static/...。
+  // 写成根绝对路径会让 strip 前缀的反代把浏览器打到站点根上（实测 404）。
+  var target = '../static/monaco-editor.html';
   // Cloudreve replaces the first literal darkmode with 2 (dark) or 1 (light). Forward only a validated cosmetic value.
   const requestedTheme = u.searchParams.get('theme') || '';
   const theme = /^(dark|2|true)$/i.test(requestedTheme) ? 'dark' : /^(light|1|false)$/i.test(requestedTheme) ? 'light' : '';
@@ -283,7 +324,8 @@ async function handleMock(req, res, u) {
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
-    const p = u.pathname;
+    const p = stripPrefix(u.pathname);
+    if (p !== u.pathname) u.pathname = p;   // handleApi/handleMock/serveStatic 都读 u.pathname
     if (p === '/healthz') return void log(null, req.method, p, send(res, 200, 'ok', 'text/plain; charset=utf-8'));
     if (p === '/hosting/discovery') {
       const base = BASE_URL || 'http://' + (req.headers.host || '127.0.0.1:' + PORT);
@@ -301,7 +343,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-collaboration=createCollaboration({server,sessions,live,checkInfo:wopiCheckFileInfo,getContents:wopiGetContents,lock:wopiLock,refresh:wopiRefreshLock,put:wopiPutFile,unlock:wopiUnlock,dataDir:process.env.COLLAB_DATA_DIR||path.join(__dirname,'.runtime','rooms'),origin:req=>BASE_URL||'http://'+req.headers.host,saveDelay:Number(process.env.COLLAB_SAVE_MS)||1000,renewMs:RENEW_MS,graceMs:Number(process.env.COLLAB_GRACE_MS)||15000});
+collaboration=createCollaboration({server,sessions,live,checkInfo:wopiCheckFileInfo,getContents:wopiGetContents,lock:wopiLock,refresh:wopiRefreshLock,put:wopiPutFile,unlock:wopiUnlock,dataDir:process.env.COLLAB_DATA_DIR||path.join(__dirname,'.runtime','rooms'),origin:req=>BASE_URL||'http://'+req.headers.host,sameOrigin,stripPrefix,saveDelay:Number(process.env.COLLAB_SAVE_MS)||1000,renewMs:RENEW_MS,graceMs:Number(process.env.COLLAB_GRACE_MS)||15000});
 let stopping=false;async function shutdown(){if(stopping)return;stopping=true;await collaboration.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),3000).unref();}
 process.on('SIGTERM',()=>void shutdown());process.on('SIGINT',()=>void shutdown());
 const BIND = process.env.BIND || '127.0.0.1';
