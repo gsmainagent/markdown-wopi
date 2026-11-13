@@ -164,22 +164,16 @@ BASE_URL=https://wopi.example.com:3443/markdown     # 子路径部署
 ALLOWED_ORIGINS=https://wopi.example.com:3443       # 只比 origin，路径会被忽略
 ```
 
-反代两种写法都支持（后端会按 `BASE_URL` 的前缀自己挂载，也会接受被剥掉前缀的转发）：
+反代两种写法都支持（后端会按 `BASE_URL` 的前缀自己挂载，也会接受被剥掉前缀的转发）：完整可抄的配置在 **[`infra/nginx.example.conf`](infra/nginx.example.conf)**，含子路径挂载、独立域名挂载、WS `Upgrade`/`Connection` 映射、超时下限与自检命令。要点只有两条：
 
 ```nginx
-# 写法 A：剥掉前缀（proxy_pass 结尾带 /）
 location /markdown/ {
-    proxy_pass http://127.0.0.1:3001/;
-    proxy_set_header Host $proxy_host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_pass http://127.0.0.1:3001/;            # 结尾带 / = 剥前缀；不带也行（后端自己剥）
     proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;      # /collab 的 WebSocket 必须带
+    proxy_set_header Upgrade $http_upgrade;       # /collab 走 WebSocket，缺了打不上
     proxy_set_header Connection "upgrade";
-    proxy_read_timeout 300s;
+    proxy_read_timeout 300s;                      # 必须 > 240s 心跳，否则协作频道被闲置掐断
 }
-
-# 写法 B：保留前缀（结尾不带 /）—— 同样可用，后端自己剥
-#   proxy_pass http://127.0.0.1:3001;
 ```
 
 写法 B 的失败形态值得记住：如果跑的是不认识前缀的旧镜像，`/markdown/hosting/discovery` 会返回 **`{"ok":false}`**（我们的 404），而不是 nginx 的 HTML 404 —— 看到这个 JSON 就说明请求已经打到应用、只是前缀没被认。
@@ -223,6 +217,7 @@ mock-data.md            MOCK=1 自测样本
 Dockerfile              多阶段镜像（构建阶段跑测试，运行阶段非 root）
 .github/workflows/      test.yml 与 docker.yml
 infra/frpc.example.toml 隧道配置示例（真实 frpc.toml 不入库）
+infra/nginx.example.conf 反代示例（子路径 + 独立域名两种挂法）
 ```
 
 
